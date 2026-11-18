@@ -1,0 +1,220 @@
+---
+title: "Okhotsk Diatom Data Processing"
+author: "Chih-Lin Wei"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###) 
+    toc_float: true
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 2000px !important;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+library(readxl)
+library(dplyr)
+library(plyr)
+library(reshape2)
+library(doBy)
+library(knitr)
+library(kableExtra)
+
+# marine Isotope Stage
+# Odd number = warmer period or inter-glacial period
+# even number = colder period or glacial period
+# https://www.researchgate.net/figure/Abbreviations-MIS-Marine-Isotope-Stages-c-cold-w-warm-hor-Horizon-Intergl_fig1_336150437
+
+# https://lorraine-lisiecki.com/LR04_MISboundaries.txt?fbclid=IwAR0QYZdQvJTZt8wdc-VWZD2flFGrx_aMyjYxTk49Czo9bnwrX2hB9yIWdu8
+mis <- read_excel("../../Data/LR04_MISboundaries.xlsx", sheet=1)[-5:-9,]
+mis <- mis[1:53,]
+
+mis <- mis[-3:-4,]
+mis[2, 2] <- "2-4"
+mis[2, 4] <- 123
+
+mis$Period <- c(rep(c("Interglacial",	"Glacial"), 25), "Interglacial")
+mis$Period <- factor(mis$Period, levels=c("Interglacial",	"Glacial"))
+```
+
+# Sample information
+
+```{r}
+dat <- read_excel("../../Data/20220419 MD012414 diatom all.xls", sheet = 1) %>% as.data.frame
+sam <- dat[, 1:3]
+names(sam) <- c("depth_cm", "corrected_depth_cm", "Age_ka")
+
+# Marine Isotope Stage
+sam$MIS <- cut(sam$Age_ka, breaks=c(0, mis$End), labels = mis$MIS, right=FALSE)
+sam <- cbind(sam, mis[match(sam$MIS, mis$MIS), -1:-2])
+
+# Mid-Pleistocene Transition
+sam$Period2 <- cut(sam$Age_ka, breaks=c(0, 830, 1230, 1600), labels = c("Post", "MPT", "Pre"), right=FALSE)
+sam$Period2 <- factor(sam$Period2, levels=c("Pre", "MPT", "Post"))
+
+# Interglacial vs. super interglacial
+sam$Period3 <- sam$Period %>% as.character
+sam$Period3[sam$MIS==5|sam$MIS==9|sam$MIS==11|sam$MIS==31|sam$MIS==47|sam$MIS==49] <- "Super interglacial"
+sam$Period3 <- factor(sam$Period3, levels=c("Interglacial", "Super interglacial",	"Glacial"))
+
+# Raw species count 
+spp <- dat[, c(-1:-3, -55:-57)] 
+row.names(spp) <- sam$Age_ka
+spp[is.na(spp)] <- 0  # Set NA to zero
+spp <- ceiling(spp) # Covert decimal values (only a few) to whole numbers
+zero <- rowSums(spp)==0 # The sample with zero count
+```
+
+A total of 130 samples, primarily collected during MPT, have zero abundance. As a result, these samples are considered to have zero diversity. Therefore, their species evenness cannot be estimated and they are omitted from calculation.
+
+```{r}
+cbind(sam, TotalAbudnace=rowSums(spp))[zero,] %>% kable %>% kable_classic
+```
+
+
+# Ancillary data
+
+```{r}
+# Wet bulk density (g/cm^3)
+wbd <- read_excel("../../Data/MD01-2414_Wet-bulk-density.xlsx", sheet = 2) %>% as.data.frame
+out <- approx(wbd$`age 20160429`, wbd$`WBD [g/cm**3]`, sam$Age_ka, rule = 2)
+sam$WBD <- out$y
+
+# Sedimentation rate (cm/kyr)
+sr <- read_excel("../../Data/MD01-2414-age-model-report_290416.xlsx", sheet = 2, n_max = 66) %>% as.data.frame
+out <- approx(sr$`Time (ka)`, sr$`Rate (cm/kyr)`, sam$Age_ka, rule = 2)
+sam$SR <- out$y
+
+# Diatom concentration (valves/g)
+dc <- read_excel("../../Data/20241007-diatom-concentration.xlsx", sheet = 1) %>% as.data.frame
+out <- approx(dc$Age..ka., dc$`Diatom conc. (valves/g)...5`, sam$Age_ka, rule = 2)
+sam$DC <- out$y
+
+# Diatom accumulation rate (valves/cm^2/yr)
+sam$DAR <- sam$DC*sam$WBD*sam$SR/1000
+sam$logDAR <- log10(sam$DAR)
+
+# d18o
+sr <- read_excel("../../Data/MD01-2414-age-model-report_290416.xlsx", sheet = 2) %>% as.data.frame
+out <- approx(sr$`Time (ka)`, sr$d18O, sam$Age_ka, rule = 2)
+sam$d18O <- out$y
+
+# Coarse fraction (%)
+cf <- read_excel("../../Data/Ancillary/MD01-2414-CF_final_20151012.xlsx", sheet = 1) %>% as.data.frame
+out <- approx(cf$`age 20160429`, cf$CF, sam$Age_ka, rule = 2)
+sam$CF <- out$y
+
+# Sea surface temperature (degree C)
+tex86 <- read_excel("../../Data/Ancillary/TEXBIT-Okhotsk_20160428.xlsx", sheet = 1, skip = 1, n_max = 382)[,-1:-13] %>% as.data.frame
+# Linear interpolation
+out <- approx(tex86$age_20160429, tex86$`SST-L...17`, sam$Age_ka, rule = 2)
+sam$SST <- out$y
+
+# Total organic carbon (mol/kg) & flux (gC cm^-2 kyr^-1)
+ea <- read_excel("../../Data/Ancillary/MD01-2414-EA-data.xlsx", sheet = 1, skip = 2, n_max = 378) %>% as.data.frame
+out <- approx(ea$`Age (ka)`, ea$`TOC (mol/kg)`, sam$Age_ka, rule = 2)
+sam$TOC <- out$y
+out <- approx(ea$`Age (ka)`, ea$`TOC (gC cm-2 kyr-1)`, sam$Age_ka, rule = 2)
+sam$TOC_F <- out$y
+
+# Total inorganic carbon (mol/kg) & flux (gC cm^-2 kyr^-1)
+out <- approx(ea$`Age (ka)`, ea$`TIC (%)`*10/12.011, sam$Age_ka, rule = 2)
+sam$TIC <- out$y
+out <- approx(ea$`Age (ka)`, ea$`TIC (gC cm-2 kyr-1)`, sam$Age_ka, rule = 2)
+sam$TIC_F <- out$y
+
+# Total nitrogen (mol/kg) & flux (gN cm^-2 kyr^-1)
+out <- approx(ea$`Age (ka)`, ea$`TN (mol/kg)`, sam$Age_ka, rule = 2)
+sam$TN <- out$y
+out <- approx(ea$`Age (ka)`, ea$`TN (gN cm-2 kyr-1)`, sam$Age_ka, rule = 2)
+sam$TN_F <- out$y
+
+# C/N ratio
+out <- approx(ea$`Age (ka)`, ea$`C/N (mol/mol)`, sam$Age_ka, rule = 2)
+sam$CN <- out$y
+
+# Total phosphate (mmol/kg) & flux (gP cm^-2 kyr^-1)
+P <- read_excel("../../Data/Ancillary/MD012414-P-data.xlsx", sheet = 2, skip=1, n_max = 509)[,1:16] %>% as.data.frame
+names(P) <- paste(read_excel("../../Data/Ancillary/MD012414-P-data.xlsx", sheet = 2, n_max = 0)[,1:16] %>% names(), names(P))
+out <- approx(P$`Age (ka)_202208 ...4`, P$`TP (mmol/kg)...10`, sam$Age_ka, rule = 2)
+sam$TP <- out$y
+
+# Calculate total phosphate flux (gP cm^-2 kyr^-1)
+# Total phosphate (mmol/kg) * 0.030973761 (g/mmol) / 1000 g/kg  * Wet bulk density (g/cm^3) * Sedimentation rate (cm/kyr)
+sam$TP_F <- sam$TP*0.030973761/1000*sam$WBD*sam$SR
+
+# Organic phosphate (mmol/kg)
+out <- approx(P$`Age (ka)_202208 ...4`, P$`Org-P (mmol/kg)...9`, sam$Age_ka, rule = 2)
+sam$OrgP <- out$y
+
+# Total inorganic phosphate (mmol/kg)
+out <- approx(P$`Age (ka)_202208 ...4`, P$`TIP-P (mmol/kg)...8`, sam$Age_ka, rule = 2)
+sam$TIP <- out$y
+
+# Detrital phosphate (mmol/kg)
+out <- approx(P$`Age (ka)_202208 ...4`, P$`Det-P (mmol/kg)...7`, sam$Age_ka, rule = 2)
+sam$DetP <- out$y
+
+# Sterol data
+st <- read_excel("../../Data/Ancillary/MD01-2414 Sterol Data.xlsx", sheet = 1, skip = 2) %>% as.data.frame
+
+# 24-Methylenecholesterol (ng/g sed.) & flux (g cm-2 kyr-1)
+out <- approx(st$`Age (ka)...3`, st$`24-Meth. (ng/g sed.)`, sam$Age_ka, rule = 2)
+sam$Meth <- out$y
+out <- approx(st$`Age (ka)...3`, st$`24-Meth. (g cm-2 kyr-1)`, sam$Age_ka, rule = 2)
+sam$Meth_F <- out$y
+
+# Brassicasterol (ng/g sed.) & flux (g cm-2 kyr-1)
+out <- approx(st$`Age (ka)...3`, st$`Brass. (ng/g sed.)`, sam$Age_ka, rule = 2)
+sam$Brass <- out$y
+out <- approx(st$`Age (ka)...3`, st$`Brass. (ng cm-2 kyr-1)`, sam$Age_ka, rule = 2)
+sam$Brass_F <- out$y
+
+# β-Sitosterol (ng/g sed.) & flux (g cm-2 kyr-1)
+out <- approx(st$`Age (ka)...3`, st$`B-sito. (ng/g sed.)`, sam$Age_ka, rule = 2)
+sam$Bsito <- out$y
+out <- approx(st$`Age (ka)...3`, st$`B-sito. (ng cm-2 kyr-1)`, sam$Age_ka, rule = 2)
+sam$Bsito_F <- out$y
+
+# Campesterol (ng/g sed.) & flux (g cm-2 kyr-1)
+out <- approx(st$`Age (ka)...3`, st$`Camp. (ng/g sed.)`, sam$Age_ka, rule = 2)
+sam$Camp <- out$y
+out <- approx(st$`Age (ka)...3`, st$`Camp. (ng cm-2 kyr-1)`, sam$Age_ka, rule = 2)
+sam$Camp_F <- out$y
+
+# Stigmasterol (ng/g sed.) & flux (g cm-2 kyr-1)
+out <- approx(st$`Age (ka)...3`, st$`Stigma. (ng/g sed.)`, sam$Age_ka, rule = 2)
+sam$Stigma <- out$y
+out <- approx(st$`Age (ka)...3`, st$`Stigma.(ng cm-2 kyr-1)`, sam$Age_ka, rule = 2)
+sam$Stigma_F <- out$y
+
+# Dinosterol (Relative ratio) & flux (Relative ratio)
+out <- approx(st$`Age (ka)...3`, st$`Dino. (Relative ratio)...21`, sam$Age_ka, rule = 2)
+sam$Dino <- out$y
+out <- approx(st$`Age (ka)...3`, st$`Dino. (Relative ratio)...29`, sam$Age_ka, rule = 2)
+sam$Dino_F <- out$y
+
+# Vascular (ng/g sed.) & flux (g cm-2 kyr-1)
+out <- approx(st$`Age (ka)...3`, st$vascular, sam$Age_ka, rule = 2)
+sam$Vascular <- out$y
+out <- approx(st$`Age (ka)...3`, st$`Vascular flux`, sam$Age_ka, rule = 2)
+sam$Vascular_F <- out$y
+```
+
+```{r}
+save(mis, file="../Rdata/mis.rda")
+save(spp, file="../Rdata/spp.rda")
+save(sam, file="../Rdata/sam.rda")
+```
+

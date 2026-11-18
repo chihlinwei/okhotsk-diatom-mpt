@@ -1,0 +1,102 @@
+---
+title: "10-fold Cross-validated R2"
+author: "Chih-Lin Wei"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(plyr)
+library(knitr)
+library(kableExtra)
+library(doBy)
+library(patchwork)
+
+# plot setting
+large <- theme(legend.title = element_text(size=20),
+        legend.text = element_text(size=20),
+        axis.title = element_text(size=20),
+        axis.text = element_text(size=20),
+        strip.text = element_text(size=20))
+# Standard error function
+se <- function(x, ...)sd(x, ...)/sqrt(length(x))
+```
+
+# DAR and alpha diveristy
+
+```{r}
+# Generalized Additive Mixed-effect Model (GAMM)
+load("../Rdata/cross_v_r2_top.rda")
+p1 <- cbind(Model = "GAMM", perf_t %>% ldply(.id = "Variable"))
+# Random Forest (RF)
+load("../Rdata/rf_concentration.rda")
+p2 <- cbind(Model = "RF", lapply(rf, FUN=function(x)x$results[row.names(x$bestTune),]) %>% ldply(.id="Variable"))
+# Generalized Boosted Regression Modeling (GBM)
+load("../Rdata/gb_concentration.rda")
+p3 <- cbind(Model = "GBM", lapply(gb, FUN=function(x)x$results[row.names(x$bestTune),]) %>% ldply(.id="Variable"))
+# Bagged Multivariate Adaptive Regression Splines (MARS)
+load("../Rdata/bm_concentration.rda")
+p4 <- cbind(Model = "MARS", lapply(bm, FUN=function(x)x$results[row.names(x$bestTune),]) %>% ldply(.id="Variable")) 
+perf <- rbind(p1, p2[,-3], p3[,-3:-6], p4[, -3:-4])
+
+kable(perf, caption="Accuracy and performance of the model by 10-fold cross validation") %>% kable_classic
+```
+
+```{r}
+perf$Model <- factor(perf$Model, levels=c("GAMM", "RF", "GBM", "MARS"))
+f1 <- ggplot(data = perf, aes(x=Variable, y=Rsquared, ymin=Rsquared-RsquaredSD, ymax=Rsquared+RsquaredSD, fill=Model, colour=Model)) +
+  geom_bar(stat="identity", position="dodge")+
+  geom_errorbar(stat="identity", position="dodge")+
+  labs(y=expression("Cross-validated"~R^2), x="", title = "(a)")+
+  scale_x_discrete(labels = c("DAR", expression(""^0*italic(D)), 
+                  expression(""^1*italic(D)), 
+                  expression(""^2*italic(D)), 
+                  expression(""^1*italic(E)), 
+                  expression(""^2*italic(E))
+                  ))+
+  scale_fill_viridis_d()+
+  scale_colour_viridis_d()+
+  theme_bw() %+replace% large
+```
+
+# Individual species
+
+```{r}
+# Random Forest (RF)
+load("../Rdata/allSpp_rf_concentration.rda")
+p2 <- cbind(Model = "RF", lapply(rf, FUN=function(x)x$results[row.names(x$bestTune),]) %>% ldply(.id="Variable"))
+# Generalized Boosted Regression Modeling (GBM)
+load("../Rdata/allSpp_gb_concentration.rda")
+p3 <- cbind(Model = "GBM", lapply(gb, FUN=function(x)x$results[row.names(x$bestTune),]) %>% ldply(.id="Variable"))
+# Bagged Multivariate Adaptive Regression Splines (MARS)
+load("../Rdata/allSpp_bm_concentration.rda")
+p4 <- cbind(Model = "MARS", lapply(bm, FUN=function(x)x$results[row.names(x$bestTune),]) %>% ldply(.id="Variable")) 
+
+perf <- rbind(p2[,-3], p3[,-3:-6], p4[, -3:-4])
+
+kable(perf, caption="Accuracy and performance of the model by 10-fold cross validation") %>% kable_classic
+
+kable(summary_by(data=perf, Rsquared~Model, FUN=c(mean, sd, se), na.rm=T), caption="Average cross-validated R2") %>% kable_classic
+```
+
+```{r}
+perf$Variable <- factor(perf$Variable, levels=p2$Variable[order(p2$Rsquared)])
+perf$Model <- factor(perf$Model, levels=c("RF", "GBM", "MARS"))
+f2 <- ggplot(data = perf, aes(x=Model, y=Rsquared, ymin=Rsquared-RsquaredSD, ymax=Rsquared+RsquaredSD, fill=Variable)) +
+  geom_bar(stat="identity", position="dodge")+
+  geom_boxplot(aes(group=Model), fill="transparent", width=0.5)+
+  labs(y=expression("Species Cross-validated"~R^2), x="", title = "(b)")+
+  scale_fill_viridis_d()+
+  scale_colour_viridis_d()+
+  theme_bw() %+replace% large %+replace% theme(legend.position = "none")
+```
+
+```{r, fig.width=10, fig.height=8}
+f1/f2
+```
+

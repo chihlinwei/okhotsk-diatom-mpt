@@ -1,0 +1,606 @@
+---
+title: "Machine learning modeling  on alpha diversity"
+author: "Chih-Lin Wei"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###) 
+    toc_float: true
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 2000px !important;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+## import packages
+library(readxl)
+library(plyr)
+library(tidyverse)
+library(ggpattern)
+library(ggrepel)
+library(Polychrome)
+library(patchwork)
+library(doBy)
+library(reshape2)
+library(knitr)
+library(kableExtra)
+library(caret)
+library(pdp)
+library(randomForest)
+library(gbm)
+library(earth)
+```
+
+# ggplot theme setting
+
+```{r}
+# plot setting
+large <- theme(legend.title = element_text(size=20),
+        legend.text = element_text(size=20),
+        axis.title = element_text(size=15),
+        axis.text = element_text(size=15),
+        strip.text = element_text(size=20))
+large2 <- theme(legend.title = element_text(size=20),
+        legend.text = element_text(size=20),
+        axis.title = element_text(size=20),
+        axis.text = element_text(size=15),
+        strip.text = element_text(size=20))
+vert_x <- theme(axis.text.x.bottom = element_text(angle = 45, hjust = 1, face="italic"))
+no_strip.x <- theme(strip.background.x = element_blank(),
+                  strip.text.x = element_blank())
+no_strip.y <- theme(strip.background.y = element_blank(),
+                  strip.text.y = element_blank())
+no_legend <- theme(legend.position = "none")
+
+# Standard error function
+se <- function(x, ...)sd(x, ...)/sqrt(length(x))
+
+load(file="../Rdata/mis.rda") # Marine Isotope Stage
+load(file="../Rdata/spp.rda") # Raw species count
+load(file="../Rdata/sam.rda") # Sample information
+load(file="../Rdata/div.rda") # Diversity
+
+zero <- rowSums(spp)==0 # The sample with zero count
+
+dat <- melt(div, id.vars = c("Age_ka", "Period", "Period2", "SST", "TOC", "TN", "TP", "TIC", "Dino"), measure.vars = c("DAR", "d0", "d1", "d2", "e1","e2")) %>% group_split(variable) 
+names(dat) <- c("DAR", "d0", "d1", "d2", "e1","e2")
+dat[2:6] <- lapply(dat[2:6], FUN=function(x)x[!zero,])
+# log10+1 transformation for Rhizosolenia hebetata; log10 transformation for others
+dat <- lapply(dat, FUN=function(x) {x$log10value <- log10(x$value); return(x)})
+```
+
+# Standardized Hill numbers at 90% sample coverage 
+
+The standardized Hill numbers were computed in the RMarkdown file **"Okhotsk_Diatom_Alpha_Diversity.Rmd."** In this section, we will load the saved data directly to analyze the diversity indices. The calculation includes species richness (0D), Shannon diversity (1D), and Simpson diversity (2D), all of which were standardized at a sample coverage of 90%. Additionally, we will assess species evenness by computing the normalized slope of the Hill number profile, which corresponds to the values for evenness (1E and 2E).
+
+# Model tuning and optimization
+
+We examined the non-linear relationships between diatom accumulation rate (DAR), species diversity (0D, 1D, and 2D) and species evenness (1E and 2E) in relation glacial cycles and paleo-environmental variables using machine learning techniques, including Random Forest (RF), Generalized Boosted Regression Modeling (GBM), and Bagged Multivariate Adaptive Regression Splines (MARS). The model parameters were fine-tuned using repeated bootstrap resampling, conducted five times to divide the data into ten parts. Each part was rotated as a test set (i.e., leaving one part out) for cross-validation, while the remaining parts were used as the training set for model development. The performance and accuracy of each model were evaluated by the same 10-fold cross-validation, repeated five times to calculate the average and standard deviation of the cross-validated root mean squared error (RMSE), R-squared (R²), and mean absolute error (MAE). The machine learning models (RF, GBM, and MARS) were constructed, tuned, and evaluated using the R package caret.
+
+# Random Forest
+
+Random Forest (RF) is an ensemble learning algorithm that constructs multiple decision trees through bootstrap resampling and generates an average prediction based on these trees [(Breiman, 2001)](https://link.springer.com/article/10.1023/A:1010933404324). We developed regression RF models using 1,000 trees, and we fine-tuned the number of variables (mtry) randomly selected at each decision split through repeated 10-fold cross-validation. The variable importances in the RF model were estimated by measuring the mean decrease in model accuracy after permuting the values of each independent variable.
+
+```{r}
+set.seed(123)
+seeds <- vector(mode = "list", length = 51)
+for(i in 1:50) seeds[[i]] <- sample.int(1000, 10)
+
+## For the last model:
+seeds[[51]] <- sample.int(1000, 1)
+
+ctrl <- trainControl(method = "repeatedcv", repeats = 5, seeds = seeds)
+```
+
+```{r, eval=FALSE}
+rf <- lapply(dat, FUN = function(x){
+  train(log10value~., data = x[,-10:-11], importance=TRUE, ntree = 1000, na.action = na.omit, 
+        method = "rf", tuneLength = 10, trControl = ctrl)
+})
+
+rf[[1]]$label <- "DAR"
+rf[[2]]$label <- "\"\"^0 * italic(D)"
+rf[[3]]$label <- "\"\"^1 * italic(D)"
+rf[[4]]$label <- "\"\"^2 * italic(D)"
+rf[[5]]$label <- "\"\"^1 * italic(E)"
+rf[[6]]$label <- "\"\"^2 * italic(E)"
+
+save(rf, file="../Rdata/rf_concentration.rda")
+```
+
+```{r}
+load("../Rdata/rf_concentration.rda")
+ap_rf <- lapply(rf, FUN=function(x)x$results[row.names(x$bestTune),]) %>% ldply(.id="label")
+
+kable(ap_rf, caption = "Accuracy and performance of the best tune RF model by 10-fold cross validation, repeated 5 times") %>% kable_classic
+```
+
+## Variable importance
+
+```{r, fig.width=6, fig.height=10}
+rf[[1]]$label <- "(b)~~~~DAR"
+rf[[2]]$label <- "(c)~~~~\"\"^0 * italic(D)"
+rf[[3]]$label <- "(d)~~~~\"\"^1 * italic(D)"
+rf[[4]]$label <- "(e)~~~~\"\"^2 * italic(D)"
+rf[[5]]$label <- "(f)~~~~\"\"^1 * italic(E)"
+rf[[6]]$label <- "(g)~~~~\"\"^2 * italic(E)"
+
+lapply(rf, FUN = function(x) {
+  data = varImp(x, type = 1)$importance
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  ggplot(subset(data, var!="Age_ka"))+
+    geom_bar(aes(x=Overall, y=var), stat = "identity")+
+    labs(x="IncMSE", y="", title = parse(text=x$label))+theme_bw() %+replace% large
+  }) %>% wrap_plots(ncol=2)
+
+lapply(rf, FUN = function(x) {
+  data = varImp(x, type = 2)$importance
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  ggplot(subset(data, var!="Age_ka"))+
+    geom_bar(aes(x=Overall, y=var), stat = "identity")+
+    labs(x="IncNodePurity", y="", title = parse(text=x$label))+theme_bw() %+replace% large
+  }) %>% wrap_plots(ncol=2)
+```
+
+```{r, fig.width=6, fig.height=10}
+imp <- lapply(rf, FUN = function(x) {
+  data = varImp(x, type = 1)$importance 
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  return(data)
+  }) %>% ldply %>% pivot_wider(id_cols = ".id", names_from = "var", values_from = "Overall") %>% as.data.frame
+rownames(imp) <- imp$.id
+imp <- imp[,-1]
+
+pca <- scale(imp) %>% prcomp
+out <- as.data.frame(pca$x)
+out$label <- c("DAR", "\"\"^0 * italic(D)", "\"\"^1 * italic(D)", "\"\"^2 * italic(D)", "\"\"^1 * italic(E)", "\"\"^2 * italic(E)")
+lab <- data.frame(pca$rotation*4)
+lab$label <- row.names(lab)
+# Variance explained by PC axes
+a1 <- round(summary(pca)$importance[2,1]*100, 1)
+a2 <- round(summary(pca)$importance[2,2]*100, 1)
+
+ggplot()+
+    geom_label_repel(data=out, aes(x=PC1, y=PC2, label=label), parse=TRUE, size=5)+
+    geom_segment(data=subset(lab, label!="Age_ka"), aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("red", 0.5))+
+    geom_label_repel(data=subset(lab, label!="Age_ka"), aes(x=PC1, y=PC2, label=label), colour="red", fill="transparent", size=5, label.padding = unit(0.2, "lines"))+
+    labs(x=paste("PCA1 (", a1, " %)", sep=""), y=paste("PCA2 (", a2, " %)", sep=""), title = "(a)")+  
+    theme_bw() %+replace% large2
+```
+
+## Partial dependence plot
+
+```{r, fig.width=12, fig.height=16}
+pd <- lapply(rf, FUN=function(x){
+  vp = varImp(x, type = 1)$importance 
+  all <- row.names(vp)[order(-vp$Overall)]
+  pn <- grep("Age_ka|PeriodGlacial|Period2MPT|Period2Post", all, value=TRUE, invert=TRUE)
+out <- NULL
+for(i in pn){
+  out[[i]] <- partial(x, pred.var = i, grid.resolution = 20) %>% melt(measure.vars = i)
+}
+return(ldply(out, .id="variable"))
+}) 
+
+pd[[1]]$ylab <- "DAR~(valves~cm^-2~y^-1)"
+pd[[2]]$ylab <- "\"\"^0 * italic(D)"
+pd[[3]]$ylab <- "\"\"^1 * italic(D)"
+pd[[4]]$ylab <- "\"\"^2 * italic(D)"
+pd[[5]]$ylab <- "\"\"^1 * italic(E)"
+pd[[6]]$ylab <- "\"\"^2 * italic(E)"
+
+pd[[1]]$label <- "(a)"
+pd[[2]]$label <- "(b)"
+pd[[3]]$label <- "(c)"
+pd[[4]]$label <- "(d)"
+pd[[5]]$label <- "(e)"
+pd[[6]]$label <- "(f)"
+
+lapply(pd, FUN=function(x){
+  ggplot(x)+
+    geom_line(aes(x=value, y=yhat))+
+    facet_wrap(~variable, scales="free_x", nrow=1)+
+    labs(x="Value", y=parse(text=x$ylab[1]), title=parse(text=x$label[1]))+
+    theme_bw() %+replace% large
+}) %>% wrap_plots(nrow=6, axes = "collect")
+```
+
+Only show top three
+
+```{r, fig.width=12, fig.height=16}
+pd <- lapply(rf, FUN=function(x){
+  vp = varImp(x, type = 1)$importance 
+  all <- row.names(vp)[order(-vp$Overall)]
+  pn <- grep("Age_ka|PeriodGlacial|Period2MPT|Period2Post", all, value=TRUE, invert=TRUE)
+out <- NULL
+for(i in pn[1:3]){
+  out[[i]] <- partial(x, pred.var = i, grid.resolution = 20) %>% melt(measure.vars = i)
+}
+return(ldply(out, .id="variable"))
+}) 
+
+pd[[1]]$ylab <- "DAR~(valves~cm^-2~y^-1)"
+pd[[2]]$ylab <- "\"\"^0 * italic(D)"
+pd[[3]]$ylab <- "\"\"^1 * italic(D)"
+pd[[4]]$ylab <- "\"\"^2 * italic(D)"
+pd[[5]]$ylab <- "\"\"^1 * italic(E)"
+pd[[6]]$ylab <- "\"\"^2 * italic(E)"
+
+pd[[1]]$label <- "(a)"
+pd[[2]]$label <- "(b)"
+pd[[3]]$label <- "(c)"
+pd[[4]]$label <- "(d)"
+pd[[5]]$label <- "(e)"
+pd[[6]]$label <- "(f)"
+
+lapply(pd, FUN=function(x){
+  ggplot(x)+
+    geom_line(aes(x=value, y=yhat))+
+    facet_wrap(~variable, scales="free_x", nrow=1)+
+    labs(x="Value", y=parse(text=x$ylab[1]), title=parse(text=x$label[1]))+
+    theme_bw() %+replace% large
+}) %>% wrap_plots(nrow=6, axes = "collect")
+```
+
+
+## Prediction
+
+```{r}
+fit <- lapply(rf, FUN=function(x) predict(x)) %>% unlist
+out <- cbind(ldply(dat, .id = "variable"), fit) 
+labs <- c("DAR", expression(""^0*italic(D)), expression(""^1*italic(D)), expression(""^2*italic(D)), expression(""^1*italic(E)), expression(""^2*italic(E))
+          )
+out$label <- factor(out$variable, labels=labs)
+```
+
+```{r, fig.width=10, fig.height=8}
+ggplot(out)+
+  geom_point(aes(x=fit, y=log10value))+
+  facet_wrap(~label, scales="free", labeller = label_parsed)+
+  labs(x="Prediction", y=expression(log[10](Observation)))+
+  theme_bw() %+replace% large
+```
+
+```{r}
+predictplot <- function(data) {
+  ## Descriptive statistics by MIS stages
+  # Top x-axis
+  ax2 <- subset(mis, Period=="Interglacial")
+
+  # Minimum and maximum ranges of each panel
+  data$logvalue <- data$log10value
+  p_range <- data[, c("variable", "logvalue", "fit")] %>% melt(id.var="variable", variable.name="range")
+
+  ax3 <- lapply(group_split(p_range, variable), FUN=function(x)cbind(ax2, ymin=min(x$value, na.rm=T), ymax=max(x$value, na.rm=T))) 
+  names(ax3) <- c("DAR", "d0", "d1", "d2", "e1", "e2")
+  ax3 <- ax3%>% ldply(.id="variable")
+  ax3$label <- factor(ax3$variable, labels= labs)
+
+  # Mid-Pleistocene Transition
+  mpt <- c(Start=830, End=1230) %>% as.data.frame %>% t
+  mpt <- lapply(group_split(p_range, variable), FUN=function(x)cbind(mpt, ymin=min(x$value, na.rm=T), ymax=max(x$value, na.rm=T))) 
+  names(mpt) <- c("DAR", "d0", "d1", "d2", "e1", "e2")
+  mpt <- mpt %>% ldply(.id="variable")
+  mpt$label <- factor(mpt$variable, labels= labs)
+  
+  ggplot()+
+  geom_rect_pattern(data=mpt, aes(xmin=Start, xmax=End, ymin=ymin, ymax=ymax), pattern="stripe", pattern_alpha = 0.1, fill="transparent", pattern_density = 0.3, colour="black", linetype = 4)+
+  geom_rect(data=ax3, aes(xmin=Start, xmax=End, ymin=ymin, ymax=ymax), fill="gray", colour="transparent", alpha=0.2)+
+  geom_line(data=data, aes(x=Age_ka, y=log10value), alpha=0.5)+
+  geom_line(data=data, aes(x=Age_ka, y=fit), colour="blue")+
+  labs(x = "Age (ka)", y = expression("Observed vs. predicted DAR &"~alpha-"diversity"))+
+  #scale_fill_viridis_d()+
+  #scale_colour_viridis_d()+
+  scale_x_reverse(expand=expansion(mult = 0.01), breaks=seq(0, 1550, 50), sec.axis = sec_axis(~.*1, breaks = with(ax2, (Start+End)/2), labels = ax2$MIS))+
+  scale_y_continuous(expand = expansion(mult = 0.01))+
+  facet_wrap(~label, labeller = label_parsed, ncol = 1, scales = "free_y", strip.position="right")+
+  theme_bw()%+replace% large %+replace% vert_x
+}
+```
+
+```{r, fig.width=12, fig.height=16}
+predictplot(out)
+```
+
+Fig.X. Observed (black) vs. predicted DAR and alpha diversity (blue).
+
+# Generalized Boosted Regression Modeling (GBM)
+
+Generalized Boosted Regression Modeling (GBM) method constructs a series of regression trees [(Friedman, 2001)](file:///Users/chihlinwei/My Drive/Projects/Okhotsk Diatoms/Ms/(Friedman, 2001)). Each tree is trained to minimize the residuals of the previous tree, and the results are combined to enhance the overall prediction. This approach enables incremental adjustments to the predictions. In our analysis, we fitted GBM models using a Gaussian error distribution. We fine-tuned various model parameters through repeated 10-fold cross-validation. These parameters included the learning rate (shrinkage), the maximum depth of each tree (interaction.depth), the minimum number of observations required in the terminal nodes of the trees (n.minobsinnode), and the total number of trees to fit (n.trees). The variable influence was calculated as the relative contribution of each predictor to the reduction in model deviance across all trees. 
+
+```{r, eval=FALSE}
+gb <- lapply(dat, FUN = function(x){
+  train(log10value~., data = na.omit(x[,-10:-11]), distribution = "gaussian", verbose = FALSE,
+        method = "gbm", tuneLength = 10, trControl = ctrl)
+})
+
+gb[[1]]$label <- "DAR"
+gb[[2]]$label <- "\"\"^0 * italic(D)"
+gb[[3]]$label <- "\"\"^1 * italic(D)"
+gb[[4]]$label <- "\"\"^2 * italic(D)"
+gb[[5]]$label <- "\"\"^1 * italic(E)"
+gb[[6]]$label <- "\"\"^2 * italic(E)"
+
+save(gb, file="../Rdata/gb_concentration.rda")
+```
+
+```{r}
+load("../Rdata/gb_concentration.rda")
+ap_gb <- lapply(gb, FUN=function(x)x$results[row.names(x$bestTune),]) %>% ldply(.id="label")
+
+kable(ap_gb, caption = "Accuracy and performance of the best tune GBM model by 10-fold cross validation, repeated 5 times") %>% kable_classic
+```
+
+## Variable importance
+
+```{r, fig.width=6, fig.height=10}
+lapply(gb, FUN = function(x) {
+  data = varImp(x)$importance 
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  ggplot(subset(data, var!="Age_ka"))+
+    geom_bar(aes(x=Overall, y=var), stat = "identity")+
+    labs(y="", title = parse(text=x$label))+theme_bw() %+replace% large
+  }) %>% wrap_plots(ncol=2)
+```
+
+```{r, fig.width=6, fig.height=10}
+imp <- lapply(gb, FUN = function(x) {
+  data = varImp(x)$importance 
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  return(data)
+  }) %>% ldply %>% pivot_wider(id_cols = ".id", names_from = "var", values_from = "Overall") %>% as.data.frame
+rownames(imp) <- imp$.id
+imp <- imp[,-1]
+
+pca <- scale(imp[,-1]) %>% prcomp
+out <- as.data.frame(pca$x)
+out$label <- c("DAR", "\"\"^0 * italic(D)", "\"\"^1 * italic(D)", "\"\"^2 * italic(D)", "\"\"^1 * italic(E)", "\"\"^2 * italic(E)")
+lab <- data.frame(pca$rotation*4)
+lab$label <- row.names(lab)
+# Variance explained by PC axes
+a1 <- round(summary(pca)$importance[2,1]*100, 1)
+a2 <- round(summary(pca)$importance[2,2]*100, 1)
+
+ggplot()+
+    geom_label_repel(data=out, aes(x=PC1, y=PC2, label=label), parse=TRUE, size=5)+
+    geom_segment(data=subset(lab, label!="Age_ka"), aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("red", 0.5))+
+    geom_label_repel(data=subset(lab, label!="Age_ka"), aes(x=PC1, y=PC2, label=label), colour="red", fill="transparent", size=5, label.padding = unit(0.2, "lines"))+
+    labs(x=paste("PCA1 (", a1, " %)", sep=""), y=paste("PCA2 (", a2, " %)", sep=""))+  
+    theme_bw() %+replace% large
+```
+
+## Partial dependence plot
+
+```{r, fig.width=16, fig.height=16}
+pd <- lapply(gb, FUN=function(x){
+  vp = varImp(x)$importance  
+  all <- row.names(vp)[order(-vp$Overall)]
+  grep("Age_Ka|PeriodGlacial|Period2MPT|Period2Post", all)
+  pn <- grep("Age_ka|PeriodGlacial|Period2MPT|Period2Post", all, value=TRUE, invert=TRUE)
+out <- NULL
+for(i in pn){
+  out[[i]] <- partial(x, pred.var = i, grid.resolution = 20) %>% melt(measure.vars = i)
+}
+return(ldply(out, .id="variable"))
+}) 
+
+pd[[1]]$label <- "DAR"
+pd[[2]]$label <- "\"\"^0 * italic(D)"
+pd[[3]]$label <- "\"\"^1 * italic(D)"
+pd[[4]]$label <- "\"\"^2 * italic(D)"
+pd[[5]]$label <- "\"\"^1 * italic(E)"
+pd[[6]]$label <- "\"\"^2 * italic(E)"
+
+lapply(pd, FUN=function(x){
+  ggplot(x)+
+  geom_line(aes(x=value, y=yhat))+
+  facet_wrap(~variable, scales="free", nrow=1)+
+  labs(x="Value", y="Partial Dependence", title=parse(text=x$label[1]))+
+  theme_bw() %+replace% large
+}) %>% wrap_plots(nrow=6, axes = "collect")
+```
+
+## Prediction
+
+```{r}
+fit <- lapply(gb, FUN=function(x) predict(x)) %>% unlist
+out <- cbind(ldply(dat, .id = "variable"), fit) 
+out$label <- factor(out$variable, labels=labs)
+```
+
+```{r, fig.width=10, fig.height=8}
+ggplot(out)+
+  geom_point(aes(x=fit, y=log10value))+
+  facet_wrap(~label, scales="free", labeller = label_parsed)+
+  labs(x="Prediction", y=expression(log[10](Observation)))+
+  theme_bw() %+replace% large
+```
+
+```{r, fig.width=12, fig.height=16}
+predictplot(out)
+```
+
+# Bagged Multivariate Adaptive Regression Splines
+
+Multivariate Adaptive Regression Splines (MARS) is a flexible regression technique that captures complex, non-linear relationships by fitting piecewise linear segments (splines) to the data [(Friedman, 1991)](https://doi.org/10.1214/aos/1176347963). It adaptively determines the locations of knots in the splines. Bagging MARS involves training multiple MARS models using bootstrapped resampling and combining their outputs. Initially, the MARS models may overfit due to the inclusion of numerous basis functions. Then, a backward stepwise elimination procedure is used to prune the models, reducing them to minimize generalized cross-validation (GCV) errors. In this analysis, we fine-tuned the maximum degree of interaction (degree) and the maximum number of terms in the pruned model (nprune) through repeated 10-fold cross-validation. The variable importance was assessed based on the reductions in GCV.
+
+```{r, eval=FALSE}
+bm <- lapply(dat, FUN = function(x){
+  train(log10value~., data = na.omit(x[,-10:-11]),
+        method = "bagEarth", tuneLength = 10, trControl = ctrl)
+})
+
+bm[[1]]$label <- "DAR"
+bm[[2]]$label <- "\"\"^0 * italic(D)"
+bm[[3]]$label <- "\"\"^1 * italic(D)"
+bm[[4]]$label <- "\"\"^2 * italic(D)"
+bm[[5]]$label <- "\"\"^1 * italic(E)"
+bm[[6]]$label <- "\"\"^2 * italic(E)"
+
+save(bm, file="../Rdata/bm_concentration.rda")
+```
+
+```{r}
+load("../Rdata/bm_concentration.rda")
+ap_bm <- lapply(bm, FUN=function(x)x$results[row.names(x$bestTune),]) %>% ldply(.id="label") 
+
+kable(ap_bm, caption = "Accuracy and performance of the best tune SVM model by 10-fold cross validation, repeated 5 times") %>% kable_classic
+```
+
+## Variable importance
+
+```{r, fig.width=6, fig.height=10}
+lapply(bm, FUN = function(x) {
+  data = varImp(x)$importance 
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  ggplot(subset(data, var!="Age_ka"))+
+    geom_bar(aes(x=Overall, y=var), stat = "identity")+
+    labs(y="", title = parse(text=x$label))+theme_bw() %+replace% large
+  }) %>% wrap_plots(ncol=2)
+```
+
+```{r, fig.width=6, fig.height=10}
+imp <- lapply(bm, FUN = function(x) {
+  data = varImp(x)$importance 
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  return(data)
+  }) %>% ldply %>% pivot_wider(id_cols = ".id", names_from = "var", values_from = "Overall") %>% as.data.frame
+rownames(imp) <- imp$.id
+imp <- imp[,-1]
+imp[is.na(imp)] <- 0
+pca <- scale(imp) %>% prcomp
+out <- as.data.frame(pca$x)
+out$label <- c("DAR", "\"\"^0 * italic(D)", "\"\"^1 * italic(D)", "\"\"^2 * italic(D)", "\"\"^1 * italic(E)", "\"\"^2 * italic(E)")
+lab <- data.frame(pca$rotation*4)
+lab$label <- row.names(lab)
+# Variance explained by PC axes
+a1 <- round(summary(pca)$importance[2,1]*100, 1)
+a2 <- round(summary(pca)$importance[2,2]*100, 1)
+
+ggplot()+
+    geom_label_repel(data=out, aes(x=PC1, y=PC2, label=label), parse=TRUE, size=5)+
+    geom_segment(data=subset(lab, label!="Age_ka"), aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("red", 0.5))+
+    geom_label_repel(data=subset(lab, label!="Age_ka"), aes(x=PC1, y=PC2, label=label), colour="red", fill="transparent", size=5, label.padding = unit(0.2, "lines"))+
+    labs(x=paste("PCA1 (", a1, " %)", sep=""), y=paste("PCA2 (", a2, " %)", sep=""), title = "IncMSE")+  
+    theme_bw() %+replace% large
+```
+
+## Partial dependence plot
+
+```{r, fig.width=16, fig.height=16}
+pd <- lapply(bm, FUN=function(x){
+  vp = varImp(x)$importance  
+  all <- row.names(vp)[order(-vp$Overall)]
+  grep("Age_Ka|PeriodGlacial|Period2MPT|Period2Post", all)
+  pn <- grep("Age_ka|PeriodGlacial|Period2MPT|Period2Post", all, value=TRUE, invert=TRUE)
+out <- NULL
+for(i in pn){
+  out[[i]] <- partial(x, pred.var = i, grid.resolution = 20) %>% melt(measure.vars = i)
+}
+return(ldply(out, .id="variable"))
+}) 
+
+pd[[1]]$label <- "DAR"
+pd[[2]]$label <- "\"\"^0 * italic(D)"
+pd[[3]]$label <- "\"\"^1 * italic(D)"
+pd[[4]]$label <- "\"\"^2 * italic(D)"
+pd[[5]]$label <- "\"\"^1 * italic(E)"
+pd[[6]]$label <- "\"\"^2 * italic(E)"
+
+lapply(pd, FUN=function(x){
+  ggplot(x)+
+  geom_line(aes(x=value, y=yhat))+
+  facet_wrap(~variable, scales="free", nrow=1)+
+  labs(x="Value", y="Partial Dependence", title=parse(text=x$label[1]))+
+  theme_bw() %+replace% large
+}) %>% wrap_plots(nrow=6, axes = "collect")
+```
+
+## Prediction
+
+```{r}
+fit <- lapply(bm, FUN=function(x) predict(x)) %>% unlist
+out <- cbind(ldply(dat, .id = "variable"), fit) 
+out$label <- factor(out$variable, labels=labs)
+```
+
+```{r, fig.width=10, fig.height=8}
+ggplot(out)+
+  geom_point(aes(x=fit, y=log10value))+
+  facet_wrap(~label, scales="free", labeller = label_parsed)+
+  labs(x="Prediction", y=expression(log[10](Observation)))+
+  theme_bw() %+replace% large
+```
+
+```{r, fig.width=12, fig.height=16}
+predictplot(out)
+```
+
+# Ensemble average prediction
+
+The R-squared values from the 10-fold cross-validation indicate that the Random Forest (RF) model has the highest accuracy and performance among the three machine learning algorithms. However, we will calculate the ensemble average of the predictions from RF, Gradient Boosting Machine (GBM), and Bagged Multivariate Adaptive Regression Splines (MARS), weighted by their respective R-squared values from the 10-fold cross-validation.
+
+```{r}
+# Predictions from RF, GBM, and SVM
+x <- cbind(lapply(rf, FUN=function(x)predict(x)) %>% unlist, 
+           lapply(gb, FUN=function(x)predict(x)) %>% unlist, 
+           lapply(bm, FUN=function(x)predict(x)) %>% unlist
+           ) 
+colnames(x) <- c("rf", "gb", "bm")
+
+# R squares of RF, GBM, and MARS
+w <- cbind(ap_rf$Rsquared, ap_gb$Rsquared, ap_bm$Rsquared) 
+colnames(w) <- c("rf", "gb", "bm")
+r2 <- w %>% as.data.frame %>% pivot_longer(cols = c("rf", "gb", "bm"))
+r2$Method <- factor(r2$name, levels=c("rf", "gb", "bm"), labels=c("RF", "GBRM", "MARS"))
+
+ggplot(data = r2, aes(x = value, colour = Method)) +
+  geom_density(linewidth = 1.5)+
+  labs(x=expression("Cross-validated"~R^2), y="Density")+
+  theme_bw() %+replace% large
+
+ggplot(data = r2, aes(y = value, x = Method, fill = Method)) +
+  geom_violin()+
+  labs(y=expression("Cross-validated"~R^2), x="")+
+  theme_bw() %+replace% large
+
+w <- w[match(lapply(dat, FUN=function(x)x$variable) %>% unlist, ap_rf$label), ]
+
+av <- NULL
+for(i in 1:dim(x)[1]) {
+  av <- c(av, weighted.mean(x[i,], w[i,]))
+}
+
+out <- cbind(ldply(dat, .id = "variable"), fit=av) 
+out$label <- factor(out$variable, labels=labs)
+```
+
+```{r, fig.width=10, fig.height=8}
+ggplot(out)+
+  geom_point(aes(x=fit, y=log10value))+
+  facet_wrap(~label, scales="free", labeller = label_parsed)+
+  labs(x="Prediction", y=expression(log[10](Observation)))+
+  theme_bw() %+replace% large
+```
+
+```{r, fig.width=12, fig.height=16}
+predictplot(out)
+```

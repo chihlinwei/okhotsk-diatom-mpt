@@ -1,0 +1,1026 @@
+---
+title: "Machine learning modeling on all species"
+author: "Chih-Lin Wei"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###) 
+    toc_float: true
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 2000px !important;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+## import packages
+library(readxl)
+library(plyr)
+library(tidyverse)
+library(ggpattern)
+library(ggrepel)
+library(Polychrome)
+library(patchwork)
+library(doBy)
+library(reshape2)
+library(knitr)
+library(kableExtra)
+library(caret)
+library(pdp)
+library(randomForest)
+library(gbm)
+library(earth)
+library(vegan)
+library(viridis)
+```
+
+# ggplot theme setting
+
+```{r}
+# plot setting
+large <- theme(legend.title = element_text(size=15),
+        legend.text = element_text(size=15),
+        axis.title = element_text(size=15),
+        axis.text = element_text(size=15),
+        strip.text = element_text(size=15))
+large2 <- theme(legend.title = element_text(size=20),
+        legend.text = element_text(size=20),
+        axis.title = element_text(size=30),
+        axis.text.x.top = element_text(size = 20),
+        axis.text.x.bottom = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        axis.text = element_text(size=20),
+        strip.text = element_text(size=30))
+large3 <- theme(legend.title = element_text(size=30),
+        legend.text = element_text(size=30),
+        axis.title = element_text(size=30),
+        axis.text.x.top = element_text(size = 30),
+        axis.text.x.bottom = element_text(size = 30),
+        axis.text.y = element_text(size = 25),
+        axis.text = element_text(size=30),
+        strip.text = element_text(size=30))
+vert_x <- theme(axis.text.x.bottom = element_text(angle = 45, hjust = 1, face="italic"))
+no_strip.x <- theme(strip.background.x = element_blank(),
+                  strip.text.x = element_blank())
+no_strip.y <- theme(strip.background.y = element_blank(),
+                  strip.text.y = element_blank())
+no_legend <- theme(legend.position = "none")
+
+# Standard error function
+se <- function(x, ...)sd(x, ...)/sqrt(length(x))
+
+load(file="../Rdata/mis.rda") # Marine Isotope Stage
+load(file="../Rdata/spp.rda") # Raw species count
+load(file="../Rdata/sam.rda") # Sample information
+load(file="../Rdata/div.rda") # Diversity
+rel_abun <- spp/rowSums(spp) # Relative abundance
+rel_abun[is.na(rel_abun)] <- 0
+zero <- rowSums(spp)==0 # The sample with zero count
+```
+
+# Indicator species from each period
+
+The Indicator Value (IndVal), as defined by [Dufrêne & Legendre (1997)](https://doi.org/10.1890/0012-9615(1997)067[0345:SAAIST]2.0.CO;2), represents a measure of species specificity and fidelity within a specified group, such as pre-MPT, MPT, post-MPT, and their combinations. Specifically, IndVal is calculated as square root of the product of relative abundance (i.e., specificity) and relative frequency (i.e., fidelity) of a species present in the defined group. The specificity measures how exclusive a species to a particular group and is equal to the mean species abundance in target group divided by the sum of mean species abundances across all groups. On the other hand, fidelity measures how often a species occurs within a group and is equal to the number of sites within the target group where species is present divided by the total number of sites in the target group.
+
+The Indicator Value (IndVal) takes a value of 0 when a species is absent from the group and reaches a maximum of 1 when the species is found in all sites of only that group and not in any others. Therefore, the highest IndVal values are indicative of species that are abundant in one group but completely absent in others, while uncommon species typically yield low IndVal values due to their low fidelity. Conversely, species that are widespread across all groups will show high fidelity and thus high IndVal scores. The statistical significance of these IndVal values is assessed through a permutation test, which is performed 999 times. 
+
+The statistical significance of these IndVal values (or species-group associations) can be assessed through a permutation test (999 times) on the null hypothesis that the IndVal values in a specific group (or combination of groups) is not higher than the other groups. Therefore, the permutation tests are only conducted for species with the highest indicator values in a particular group.
+
+A total of 37 out of 51 species were identified as significant indicator species in the Pre, MPT, Post, and MPT+Post periods. Pre+MPT+Post period do not have p values, because no permutation test is conducted for species in the group encompassing all three periods. 
+
+```{r}
+library(indicspecies)
+# Indicator species
+  IndVal <- multipatt(spp, sam$Period2, permutations=999)
+  # Convert output to long format
+  long <- cbind(Species=row.names(IndVal$A) %>% rep(each = 7),
+                   # Specificity (= relative abundance)
+                  pivot_longer(IndVal$A %>% as.data.frame, col=everything(), names_to = "index", values_to = "specificity"),
+                  # Fidelity (= frequency of occurrence)
+                  pivot_longer(IndVal$B %>% as.data.frame, col=everything(), names_to = "index", values_to = "fidelity")[,2],
+                  # Indicator value (square root of A * B)
+                  pivot_longer(IndVal$str %>% as.data.frame, col=everything(), names_to = "index", values_to = "stat")[,2]
+                  )
+# Add p values to the max indicator values among group (only those are consider indicator and tested)
+long$p.value <- NA
+long$index <- factor(long$index, levels=c("Pre", "MPT", "Post", "Pre+MPT", "MPT+Post", "Pre+Post", "Pre+MPT+Post"))
+S <- IndVal$sign
+S$index <- factor(S$index, levels=1:7, labels=c("Pre", "MPT", "Post", "Pre+MPT", "MPT+Post", "Pre+Post", "Pre+MPT+Post"))
+keep <- match(paste(row.names(S), S$index), paste(long$Species, long$index))
+long$p.value[keep] <- S$p.value
+long <- lapply(group_split(long, index), FUN=function(x)x[order(-x$p.value, x$stat, decreasing = TRUE),]) %>% ldply
+# Indicator species with p value 
+wp <- subset(long, stat!=0 & !is.na(p.value))
+# Indicator species without p value
+np <- subset(long, index == "Pre+MPT+Post" & is.na(p.value))
+np <- subset(np, !np$Species %in% wp$Species)
+
+# Combine significant and non-significant indicator species
+all_species <- rbind(wp, np)
+all_species$Group <- as.character(all_species$index)
+all_species$Group[all_species$p.value >=0.05 | is.na(all_species$p.value)] <- "N.S."
+all_species$Group <- factor(all_species$Group, levels = c("Pre", "MPT", "Post", "MPT+Post", "N.S."))
+all_species$Label <- sub(" ", "~~", paste("italic(", sub(" *\\(.*| *\\var. egregius.*", "", all_species$Species), ")", sep="")) 
+
+ord <- order(all_species$Group, -all_species$stat)
+all_species <- all_species[ord,]
+all_species[,-8] %>% kable(caption = "Indicator species") %>% kable_classic()
+
+# Top 3 indicator species from each group
+top_species <- all_species %>% group_split(Group) %>% lapply(FUN=function(x)x[order(-x$stat),][1:3,]) %>% ldply %>% subset(!is.na(stat))
+top_species[,-8] %>% kable(caption = "Only show the top three significant indicator species from each group. The Post period only have two significant indicator species. Three species with the highsest indicator values from Pre+MPT+Post are included. However, they are not significant indicator sepcies, because no permutation test was conducted") %>% kable_classic()
+```
+
+```{r}
+dat <- melt(cbind(sam, rel_abun), id.vars = c("Age_ka", "Period", "Period2", "SST", "TOC", "TN", "TP", "TIC", "Dino"), measure.vars = all_species$Species) %>% group_split(variable) 
+names(dat) <- all_species$Species
+```
+
+# Random Forest
+
+Random Forest is an ensemble learning algorithm that builds multiple decision trees during the training process and produces an average prediction from these trees. By combining the results of many individual trees, Random Forest helps reduce overfitting while enhancing accuracy and robustness compared to other methods.
+
+```{r}
+set.seed(123)
+seeds <- vector(mode = "list", length = 51)
+for(i in 1:50) seeds[[i]] <- sample.int(1000, 10)
+
+## For the last model:
+seeds[[51]] <- sample.int(1000, 1)
+
+ctrl <- trainControl(method = "repeatedcv", repeats = 5, seeds = seeds)
+```
+
+```{r, eval=FALSE}
+rf <- lapply(dat, FUN = function(x){
+  train(value~., data = x[,-10], importance=TRUE, ntree = 1000, na.action = na.omit, 
+        method = "rf", tuneLength = 10, trControl = ctrl)
+})
+
+names(rf) <- all_species$Species
+
+for(i in 1:length(dat)) {
+  rf[[i]]$label <-all_species$Label[i]
+}
+
+save(rf, file="../Rdata/allSpp_rf_concentration.rda")
+```
+
+## All species
+
+### Model performance
+
+```{r}
+load("../Rdata/allSpp_rf_concentration.rda")
+ap_rf <- lapply(rf, FUN=function(x)x$results[row.names(x$bestTune),]) %>% ldply(.id="label")
+kable(cbind(Group = all_species$Group, ap_rf), caption = "Accuracy and performance of the best tune RF model by 10-fold cross validation, repeated 5 times") %>% kable_classic
+```
+
+```{r}
+# Mean R cross-validated R squared
+mu <- round(mean(ap_rf$Rsquared, na.rm=T), 2)
+# Standard deviation
+sdv <- round(sd(ap_rf$Rsquared, na.rm=T), 3)
+
+ggplot(data = cbind(Group = all_species$Group, ap_rf), aes(x=Rsquared, fill=Group))+
+  geom_density(alpha=0.8, position = "stack")+
+  annotate("text", x=0.4, y=25, label =  sprintf("Mean = %.2f\nSD = %.2f", mu, sdv), hjust = 0, vjust = 1, size = 4)+
+  labs(x=expression("Cross-validated"~R^2), y="Density")+
+  scale_fill_viridis_d(direction = -1)+
+  theme_bw() %+replace% large
+```
+
+
+### Variable importance
+
+```{r, fig.width=8.5, fig.height=6.4}
+imp <- lapply(rf, FUN = function(x) {
+  data = varImp(x, type = 1)$importance 
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  return(data)
+  }) %>% ldply %>% pivot_wider(id_cols = ".id", names_from = "var", values_from = "Overall") %>% as.data.frame
+rownames(imp) <- imp$.id
+imp <- imp[,-1]
+
+pca <- scale(imp) %>% prcomp
+out <- as.data.frame(pca$x)
+out$label <-all_species$Label
+out$Group <- all_species$Group
+lab <- data.frame(pca$rotation*5)
+lab$label <- row.names(lab)
+# Variance explained by PC axes
+a1 <- round(summary(pca)$importance[2,1]*100, 1)
+a2 <- round(summary(pca)$importance[2,2]*100, 1)
+
+ggplot()+
+    geom_label_repel(data=out, aes(x=PC1, y=PC2, label=label, colour=Group), parse = TRUE)+
+    geom_segment(data=subset(lab, label!="Age_ka"), aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("black", 0.5))+
+    geom_label_repel(data=subset(lab, label!="Age_ka"), aes(x=PC1, y=PC2, label=label), colour="black", fill="transparent", label.padding = unit(0.2, "lines"))+
+    labs(x=paste("PCA1 (", a1, " %)", sep=""), y=paste("PCA2 (", a2, " %)", sep=""))+  
+  scale_colour_viridis_d(direction = -1)+
+    theme_bw() %+replace% large
+```
+
+### Variable correlations with model predictions
+
+```{r, fig.width=8.5, fig.height=6.4}
+pred <- lapply(rf, FUN=function(x) cbind(Age_ka = sam$Age_ka, fit = predict(x)) %>% as.data.frame) %>% ldply %>% pivot_wider(names_from = .id, values_from = fit) %>% as.data.frame
+row.names(pred) <- pred$Age_ka
+pca <- pred[,-1] %>% prcomp
+out <- as.data.frame(pca$x)
+out <- cbind(sam[,c("Age_ka", "Period", "Period2")], out)
+
+fit <- envfit(out[, c("PC1", "PC2")], sam[, c("Period", "Period2", "SST", "TOC", "TN", "TP", "TIC", "Dino")])
+
+lab <- data.frame(fit$vectors$arrows*0.2)
+lab$label <- row.names(lab)
+# Variance explained by PC axes
+a1 <- round(summary(pca)$importance[2,1]*100, 1)
+a2 <- round(summary(pca)$importance[2,2]*100, 1)
+
+ggplot()+
+    geom_point(data=out, aes(x=PC1, y=PC2, colour=Period2), size = 3, alpha=0.8)+
+    geom_segment(data=lab, aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("black", 0.5))+
+    geom_label_repel(data=lab, aes(x=PC1, y=PC2, label=label), colour="black", fill="transparent", label.padding = unit(0.2, "lines"))+
+    labs(x=paste("PCA1 (", a1, " %)", sep=""), y=paste("PCA2 (", a2, " %)", sep=""), colour = "Period")+  
+  scale_colour_viridis_d(direction = -1)+
+    theme_bw() %+replace% large
+```
+
+## Top indicator species
+
+### Model performance
+
+```{r}
+ap_rf <- lapply(rf[top_species$Species], FUN=function(x)x$results[row.names(x$bestTune),]) %>% ldply(.id="label")
+kable(cbind(Group = top_species$Group, ap_rf), caption = "Only show the top 3 indicator species from each group") %>% kable_classic
+```
+
+```{r}
+# Mean R cross-validated R squared
+mu <- round(mean(ap_rf$Rsquared, na.rm=T), 2)
+# Standard deviation
+sdv <- round(sd(ap_rf$Rsquared, na.rm=T), 3)
+
+ggplot(data = cbind(Group = top_species$Group, ap_rf), aes(x=Rsquared, fill=Group))+
+  geom_density(alpha=0.8, position = "stack")+
+  annotate("text", x=0.4, y=25, label =  sprintf("Mean = %.2f\nSD = %.2f", mu, sdv), hjust = 0, vjust = 1, size = 4)+
+  labs(x=expression("Cross-validated"~R^2), y="Density")+
+  scale_fill_viridis_d(direction = -1)+
+  theme_bw() %+replace% large
+```
+
+### Variable importance
+
+```{r, fig.width=15, fig.height=16}
+p1 <- lapply(rf[top_species$Species[1:8]], FUN = function(x) {
+  data = varImp(x, type = 1)$importance 
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  ggplot(subset(data, var!="Age_ka"))+
+    geom_bar(aes(x=Overall, y=var), stat = "identity",
+             fill = viridis(5, direction = -1)[top_species$Group[top_species$Label %in% x$label]],
+             colour = "black")+
+    labs(x="IncMSE", y="", 
+         title = parse(text = paste("(", letters[1:14][top_species$Label %in% x$label], ")~~", x$label, sep=""))
+         )+theme_bw() %+replace% large
+  }) %>% wrap_plots(ncol=3)
+
+
+p2 <- lapply(rf[top_species$Species[9:14]], FUN = function(x) {
+  data = varImp(x, type = 1)$importance 
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  ggplot(subset(data, var!="Age_ka"))+
+    geom_bar(aes(x=Overall, y=var), stat = "identity",
+             fill = viridis(5, direction = -1)[top_species$Group[top_species$Label %in% x$label]],
+             colour = "black")+
+    labs(x="IncMSE", y="", 
+         title = parse(text = paste("(", letters[1:14][top_species$Label %in% x$label], ")~~", x$label, sep=""))
+         )+theme_bw() %+replace% large
+  }) %>% wrap_plots(ncol=3)
+
+p1/p2+plot_layout(height=c(3, 2))
+```
+
+```{r, fig.width=10, fig.height=8}
+imp <- lapply(rf[top_species$Species], FUN = function(x) {
+  data = varImp(x, type = 1)$importance 
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  return(data)
+  }) %>% ldply %>% pivot_wider(id_cols = ".id", names_from = "var", values_from = "Overall") %>% as.data.frame
+rownames(imp) <- imp$.id
+imp <- imp[,-1]
+
+pca <- scale(imp) %>% prcomp
+out <- as.data.frame(pca$x)
+out$label <-top_species$Label
+out$Group <- top_species$Group
+lab <- data.frame(pca$rotation*4)
+lab$label <- row.names(lab)
+# Variance explained by PC axes
+a1 <- round(summary(pca)$importance[2,1]*100, 1)
+a2 <- round(summary(pca)$importance[2,2]*100, 1)
+
+ggplot()+
+    geom_label_repel(data=out, aes(x=PC1, y=PC2, label=label, colour=Group), parse = TRUE)+
+    geom_segment(data=subset(lab, label!="Age_ka"), aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("black", 0.5))+
+    geom_label_repel(data=subset(lab, label!="Age_ka"), aes(x=PC1, y=PC2, label=label), colour="black", fill="transparent", label.padding = unit(0.2, "lines"))+
+    labs(x=paste("PCA1 (", a1, " %)", sep=""), y=paste("PCA2 (", a2, " %)", sep=""))+  
+  scale_colour_viridis_d(direction = -1)+
+    theme_bw() %+replace% large
+```
+
+### Variable correlations with model predictions
+
+```{r, fig.width=8.5, fig.height=6.4}
+pred <- lapply(rf[top_species$Species], FUN=function(x) cbind(Age_ka = sam$Age_ka, fit = predict(x)) %>% as.data.frame) %>% ldply %>% pivot_wider(names_from = .id, values_from = fit) %>% as.data.frame
+row.names(pred) <- pred$Age_ka
+pca <- pred[,-1] %>% prcomp
+out <- as.data.frame(pca$x)
+out <- cbind(sam[,c("Age_ka", "Period", "Period2")], out)
+
+fit <- envfit(out[, c("PC1", "PC2")], sam[, c("Period", "Period2", "SST", "TOC", "TN", "TP", "TIC", "Dino")])
+
+lab <- data.frame(fit$vectors$arrows*0.2)
+lab$label <- row.names(lab)
+# Variance explained by PC axes
+a1 <- round(summary(pca)$importance[2,1]*100, 1)
+a2 <- round(summary(pca)$importance[2,2]*100, 1)
+
+ggplot()+
+    geom_point(data=out, aes(x=PC1, y=PC2, colour=Period2), size = 3, alpha =0.8)+
+    geom_segment(data=lab, aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("black", 0.5))+
+    geom_label_repel(data=lab, aes(x=PC1, y=PC2, label=label), colour="black", fill="transparent", label.padding = unit(0.2, "lines"))+
+    labs(x=paste("PCA1 (", a1, " %)", sep=""), y=paste("PCA2 (", a2, " %)", sep=""), colour = "Period")+  
+  scale_colour_viridis_d(direction = -1)+
+    theme_bw() %+replace% large
+```
+
+
+### Partial dependence
+
+```{r, fig.width=14, fig.height=32}
+pd <- lapply(rf[top_species$Species], FUN=function(x){
+  vp = varImp(x, type = 1)$importance 
+  all <- row.names(vp)[order(-vp$Overall)]
+  grep("Age_Ka|PeriodGlacial|Period2MPT|Period2Post", all)
+  pn <- grep("Age_ka|PeriodGlacial|Period2MPT|Period2Post", all, value=TRUE, invert=TRUE)
+out <- NULL
+for(i in pn){
+  out[[i]] <- partial(x, pred.var = i, grid.resolution = 20) %>% melt(measure.vars = i)
+}
+return(ldply(out, .id="variable"))
+}) 
+
+for(i in 1:length(top_species$Species)) {
+  pd[[i]]$label <-top_species$Label[i]
+}
+
+lapply(pd, FUN=function(x){
+  ggplot(x)+
+    geom_line(aes(x=value, y=yhat), linewidth = 1.5,
+              colour = viridis(5, direction = -1)[top_species$Group[top_species$Label %in% x$label[1]]]
+              )+
+    facet_wrap(~variable, scales="free_x", nrow=1)+
+    labs(x="Value", y=parse(text=x$label[1]))+
+    theme_bw() 
+}) %>% wrap_plots(nrow=14, axis_titles = "collect_x")
+```
+
+```{r, fig.width=7.5, fig.height=30}
+pd <- lapply(rf[top_species$Species], FUN=function(x){
+  vp = varImp(x, type = 1)$importance 
+  all <- row.names(vp)[order(-vp$Overall)]
+  grep("Age_Ka|PeriodGlacial|Period2MPT|Period2Post", all)
+  pn <- grep("Age_ka|PeriodGlacial|Period2MPT|Period2Post", all, value=TRUE, invert=TRUE)
+out <- NULL
+for(i in pn[1:3]){
+  out[[i]] <- partial(x, pred.var = i, grid.resolution = 20) %>% melt(measure.vars = i)
+}
+return(ldply(out, .id="variable"))
+}) 
+
+for(i in 1:length(top_species$Species)) {
+  pd[[i]]$label <-top_species$Label[i]
+}
+
+lapply(pd, FUN=function(x){
+  ggplot(x)+
+    geom_line(aes(x=value, y=yhat), linewidth = 1.5,
+              colour = viridis(5, direction = -1)[top_species$Group[top_species$Label %in% x$label[1]]])+
+    facet_wrap(~variable, scales="free_x", nrow=1)+
+    labs(x="Value", y="Partial dependence")+
+    theme_bw() %+replace% large2
+}) %>% wrap_plots(nrow=14, axis_titles = "collect") 
+```
+
+### Prediction
+
+```{r}
+fit <- lapply(rf[top_species$Species], FUN=function(x) predict(x)) %>% unlist
+out <- cbind(ldply(dat[top_species$Species], .id = "variable"), fit) 
+out$label <- factor(out$variable, levels=top_species$Species, labels=top_species$Label)
+out$Group <- factor(out$variable, levels=top_species$Species, labels=top_species$Group)
+```
+
+```{r, fig.width=15, fig.height=15}
+ggplot(out)+
+  geom_point(aes(x=fit, y=value, colour=Group))+
+  facet_wrap(~label, scales="free", labeller = label_parsed)+
+  labs(x="Prediction", y="Observation", colour = "Period")+
+  theme_bw() %+replace% large %+replace% theme(legend.position = "top") +
+  scale_colour_viridis_d(direction = -1)+
+  guides(colour = guide_legend(nrow = 1))
+```
+
+```{r}
+predictplot <- function(data) {
+  ## Descriptive statistics by MIS stages
+  # Top x-axis
+  ax2 <- subset(mis, Period=="Interglacial")
+  ax2b <- ax2[(1:dim(ax2)[1]) %% 2 != 0,]
+
+  # Minimum and maximum ranges of each panel
+  p_range <- data[, c("variable", "value", "fit")] %>% melt(id.var="variable", variable.name="range")
+  p_range$variable <- factor(p_range$variable, levels=top_species$Species)
+
+  ax3 <- lapply(group_split(p_range, variable), FUN=function(x)cbind(ax2, ymin=min(x$value, na.rm=T), ymax=max(x$value, na.rm=T))) 
+  names(ax3) <- top_species$Species
+  ax3 <- ax3%>% ldply(.id="variable")
+  ax3$label <- factor(ax3$variable, levels=top_species$Species, labels=top_species$Label)
+
+  # Mid-Pleistocene Transition
+  mpt <- c(Start=830, End=1230) %>% as.data.frame %>% t
+  mpt <- lapply(group_split(p_range, variable), FUN=function(x)cbind(mpt, ymin=min(x$value, na.rm=T), ymax=max(x$value, na.rm=T))) 
+  names(mpt) <- top_species$Species
+  mpt <- mpt %>% ldply(.id="variable")
+  mpt$label <- factor(mpt$variable, levels=top_species$Species, labels=top_species$Label)
+  
+  ggplot()+
+  geom_rect_pattern(data=mpt, aes(xmin=Start, xmax=End, ymin=ymin*100, ymax=ymax*100), pattern="stripe", pattern_alpha = 0.1, fill="transparent", pattern_density = 0.3, colour="black", linetype = 4)+
+  geom_rect(data=ax3, aes(xmin=Start, xmax=End, ymin=ymin*100, ymax=ymax*100), fill="gray", colour="transparent", alpha=0.2)+
+  geom_line(data=data, aes(x=Age_ka, y=value*100))+
+  geom_line(data=data, aes(x=Age_ka, y=fit*100, colour=Group), alpha = 0.7, linewidth=1.2)+
+  labs(x = "Age (ka)", y = "Relative abundance (%)", Colour = "Period")+
+  #scale_fill_viridis_d()+
+  scale_colour_viridis_d(direction = -1)+
+  scale_x_reverse(expand=expansion(mult = 0.01), breaks=seq(0, 1550, 100), sec.axis = sec_axis(~.*1, breaks = with(ax2b, (Start+End)/2), labels = ax2b$MIS))+
+  scale_y_continuous(expand = expansion(mult = 0.01))+
+  facet_wrap(~label, labeller = label_parsed, ncol = 1, scales = "free_y", strip.position="top")+
+  theme_bw()%+replace% large3 %+replace% vert_x %+replace% theme(legend.position = "top") + guides(colour = guide_legend(nrow = 1, override.aes = list(linewidth = 5)))
+}
+```
+
+```{r, fig.width=14.5, fig.height=30}
+predictplot(out)
+```
+
+Fig.X. Observed (black) vs. predicted DAR and alpha diversity (blue).
+
+# Generalized Boosted Regression Modeling (GBM)
+
+Generalized Boosted Regression Modeling (GBM) is an ensemble learning technique that utilizes regression trees for making predictions, commonly referred to as gradient boosting machines. The approach involves constructing a series of regression trees, where each tree is trained to minimize the residuals of the previous tree. For every new tree, a random subset of the data is utilized, with weights assigned to the input data so that those points which were poorly modeled in prior iterations have a greater likelihood of being chosen. Each new tree is incorporated into the ensemble, leading to an incremental adjustment of the overall prediction. Ultimately, the final prediction is derived from the cumulative output of all the decision trees in the ensemble.
+
+```{r, eval=FALSE}
+gb <- lapply(dat, FUN = function(x){
+  train(value~., data = na.omit(x[,-10]), distribution = "gaussian", verbose = FALSE,
+        method = "gbm", tuneLength = 10, trControl = ctrl)
+})
+
+names(gb) <- all_species$Species
+
+for(i in 1:length(dat)) {
+  gb[[i]]$label <-all_species$Label[i]
+}
+
+save(gb, file="../Rdata/allSpp_gb_concentration.rda")
+```
+
+## All species
+
+### Model performance
+
+```{r}
+load("../Rdata/allSpp_gb_concentration.rda")
+ap_gb <- lapply(gb, FUN=function(x)x$results[row.names(x$bestTune),]) %>% ldply(.id="label")
+
+kable(cbind(Group = all_species$Group, ap_gb), caption = "Accuracy and performance of the best tune GBM model by 10-fold cross validation, repeated 5 times") %>% kable_classic
+```
+
+```{r}
+# Mean R cross-validated R squared
+mu <- round(mean(ap_gb$Rsquared, na.rm=T), 2)
+# Standard deviation
+sdv <- round(sd(ap_gb$Rsquared, na.rm=T), 3)
+
+ggplot(data = cbind(Group = all_species$Group, ap_gb), aes(x=Rsquared, fill=Group))+
+  geom_density(alpha=0.8, position = "stack")+
+  annotate("text", x=0.4, y=25, label =  sprintf("Mean = %.2f\nSD = %.2f", mu, sdv), hjust = 0, vjust = 1, size = 4)+
+  labs(x=expression("Cross-validated"~R^2), y="Density")+
+  theme_bw() %+replace% large
+```
+
+### Variable importance
+
+```{r, fig.width=10, fig.height=8}
+imp <- lapply(gb, FUN = function(x) {
+  data = varImp(x)$importance 
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  return(data)
+  }) %>% ldply %>% pivot_wider(id_cols = ".id", names_from = "var", values_from = "Overall") %>% as.data.frame
+rownames(imp) <- imp$.id
+imp <- imp[,-1]
+
+pca <- scale(imp) %>% prcomp
+out <- as.data.frame(pca$x)
+out$label <-all_species$Label
+out$Group <- all_species$Group
+lab <- data.frame(pca$rotation*5)
+lab$label <- row.names(lab)
+# Variance explained by PC axes
+a1 <- round(summary(pca)$importance[2,1]*100, 1)
+a2 <- round(summary(pca)$importance[2,2]*100, 1)
+
+ggplot()+
+    geom_label_repel(data=out, aes(x=PC1, y=PC2, label=label, colour=Group), parse = TRUE)+
+    geom_segment(data=subset(lab, label!="Age_ka"), aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("black", 0.5))+
+    geom_label_repel(data=subset(lab, label!="Age_ka"), aes(x=PC1, y=PC2, label=label), colour="black", fill="transparent", label.padding = unit(0.2, "lines"))+
+    labs(x=paste("PCA1 (", a1, " %)", sep=""), y=paste("PCA2 (", a2, " %)", sep=""))+  
+    theme_bw() %+replace% large
+```
+
+### Variable correlations with model predictions
+
+```{r, fig.width=8.5, fig.height=6.4}
+pred <- lapply(gb, FUN=function(x) cbind(Age_ka = sam$Age_ka, fit = predict(x)) %>% as.data.frame) %>% ldply %>% pivot_wider(names_from = .id, values_from = fit) %>% as.data.frame
+row.names(pred) <- pred$Age_ka
+pca <- pred[,-1] %>% prcomp
+out <- as.data.frame(pca$x)
+out <- cbind(sam[,c("Age_ka", "Period", "Period2")], out)
+
+fit <- envfit(out[, c("PC1", "PC2")], sam[, c("Period", "Period2", "SST", "TOC", "TN", "TP", "TIC", "Dino")])
+
+lab <- data.frame(fit$vectors$arrows*0.2)
+lab$label <- row.names(lab)
+# Variance explained by PC axes
+a1 <- round(summary(pca)$importance[2,1]*100, 1)
+a2 <- round(summary(pca)$importance[2,2]*100, 1)
+
+ggplot()+
+    geom_point(data=out, aes(x=PC1, y=PC2, colour=Period2), size = 3, alpha =0.8)+
+    geom_segment(data=lab, aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("black", 0.5))+
+    geom_label_repel(data=lab, aes(x=PC1, y=PC2, label=label), colour="black", fill="transparent", label.padding = unit(0.2, "lines"))+
+    labs(x=paste("PCA1 (", a1, " %)", sep=""), y=paste("PCA2 (", a2, " %)", sep=""), colour = "Period")+  
+    theme_bw() %+replace% large
+```
+
+## Top indicator species
+
+### Model performance
+
+```{r}
+ap_gb <- lapply(gb[top_species$Species], FUN=function(x)x$results[row.names(x$bestTune),]) %>% ldply(.id="label")
+kable(cbind(Group = top_species$Group, ap_gb), caption = "Only show the top 3 indicator species from each group") %>% kable_classic
+```
+
+```{r}
+# Mean R cross-validated R squared
+mu <- round(mean(ap_gb$Rsquared, na.rm=T), 2)
+# Standard deviation
+sdv <- round(sd(ap_gb$Rsquared, na.rm=T), 3)
+
+ggplot(data = cbind(Group = top_species$Group, ap_gb), aes(x=Rsquared, fill=Group))+
+  geom_density(alpha=0.8, position = "stack")+
+  annotate("text", x=0.4, y=25, label =  sprintf("Mean = %.2f\nSD = %.2f", mu, sdv), hjust = 0, vjust = 1, size = 4)+
+  labs(x=expression("Cross-validated"~R^2), y="Density")+
+  theme_bw() %+replace% large
+```
+
+### Variable importance
+
+```{r, fig.width=24, fig.height=10}
+lapply(gb[top_species$Species], FUN = function(x) {
+  data = varImp(x)$importance 
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  ggplot(data)+
+    geom_bar(aes(x=Overall, y=var), stat = "identity")+
+    labs(y="", title = parse(text=x$label))+theme_bw() %+replace% large
+  }) %>% wrap_plots(ncol=7)
+```
+
+```{r, fig.width=10, fig.height=8}
+imp <- lapply(gb[top_species$Species], FUN = function(x) {
+  data = varImp(x)$importance 
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  return(data)
+  }) %>% ldply %>% pivot_wider(id_cols = ".id", names_from = "var", values_from = "Overall") %>% as.data.frame
+rownames(imp) <- imp$.id
+imp <- imp[,-1]
+
+pca <- scale(imp) %>% prcomp
+out <- as.data.frame(pca$x)
+out$label <-top_species$Label
+out$Group <- top_species$Group
+lab <- data.frame(pca$rotation*4)
+lab$label <- row.names(lab)
+# Variance explained by PC axes
+a1 <- round(summary(pca)$importance[2,1]*100, 1)
+a2 <- round(summary(pca)$importance[2,2]*100, 1)
+
+ggplot()+
+    geom_label_repel(data=out, aes(x=PC1, y=PC2, label=label, colour=Group), parse=TRUE)+
+    geom_segment(data=subset(lab, label!="Age_ka"), aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("black", 0.5))+
+    geom_label_repel(data=subset(lab, label!="Age_ka"), aes(x=PC1, y=PC2, label=label), colour="black", fill="transparent", label.padding = unit(0.2, "lines"))+
+    labs(x=paste("PCA1 (", a1, " %)", sep=""), y=paste("PCA2 (", a2, " %)", sep=""))+  
+    theme_bw() %+replace% large
+```
+
+### Variable correlations with model predictions
+
+```{r, fig.width=8.5, fig.height=6.4}
+pred <- lapply(gb[top_species$Species], FUN=function(x) cbind(Age_ka = sam$Age_ka, fit = predict(x)) %>% as.data.frame) %>% ldply %>% pivot_wider(names_from = .id, values_from = fit) %>% as.data.frame
+row.names(pred) <- pred$Age_ka
+pca <- pred[,-1] %>% prcomp
+out <- as.data.frame(pca$x)
+out <- cbind(sam[,c("Age_ka", "Period", "Period2")], out)
+
+fit <- envfit(out[, c("PC1", "PC2")], sam[, c("Period", "Period2", "SST", "TOC", "TN", "TP", "TIC", "Dino")])
+
+lab <- data.frame(fit$vectors$arrows*0.2)
+lab$label <- row.names(lab)
+# Variance explained by PC axes
+a1 <- round(summary(pca)$importance[2,1]*100, 1)
+a2 <- round(summary(pca)$importance[2,2]*100, 1)
+
+ggplot()+
+    geom_point(data=out, aes(x=PC1, y=PC2, colour=Period2), size = 3, alpha =0.8)+
+    geom_segment(data=lab, aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("black", 0.5))+
+    geom_label_repel(data=lab, aes(x=PC1, y=PC2, label=label), colour="black", fill="transparent", label.padding = unit(0.2, "lines"))+
+    labs(x=paste("PCA1 (", a1, " %)", sep=""), y=paste("PCA2 (", a2, " %)", sep=""), colour = "Period")+  
+    theme_bw() %+replace% large
+```
+
+### Partial dependence
+
+```{r, fig.width=24, fig.height=56}
+pd <- lapply(gb[top_species$Species], FUN=function(x){
+  vp = varImp(x)$importance  
+  all <- row.names(vp)[order(-vp$Overall)]
+  grep("Age_Ka|PeriodGlacial|Period2MPT|Period2Post", all)
+  pn <- grep("Age_ka|PeriodGlacial|Period2MPT|Period2Post", all, value=TRUE, invert=TRUE)
+out <- NULL
+for(i in pn){
+  out[[i]] <- partial(x, pred.var = i, grid.resolution = 20) %>% melt(measure.vars = i)
+}
+return(ldply(out, .id="variable"))
+}) 
+
+
+for(i in 1:length(top_species$Species)) {
+  pd[[i]]$label <-top_species$Label[i]
+}
+
+lapply(pd, FUN=function(x){
+  ggplot(x)+
+  geom_line(aes(x=value, y=yhat))+
+  facet_wrap(~variable, scales="free", nrow=1)+
+  labs(x="", y="Partial Dependence", title=parse(text=x$label[1]))+
+  theme_bw() %+replace% large
+}) %>% wrap_plots(nrow=14)
+```
+
+### Prediction
+
+```{r}
+fit <- lapply(gb[top_species$Species], FUN=function(x) predict(x)) %>% unlist
+out <- cbind(ldply(dat[top_species$Species], .id = "variable"), fit) 
+out$label <- factor(out$variable, levels=top_species$Species, labels=top_species$Label)
+out$Group <- factor(out$variable, levels=top_species$Species, labels=top_species$Group)
+```
+
+```{r, fig.width=15, fig.height=15}
+ggplot(out)+
+  geom_point(aes(x=fit, y=value, colour=Group))+
+  facet_wrap(~label, scales="free", labeller = label_parsed)+
+  labs(x="Prediction", y="Observation", colour = "Period")+
+  theme_bw() %+replace% large %+replace% theme(legend.position = "top") + guides(colour = guide_legend(nrow = 1))
+```
+
+```{r, fig.width=25, fig.height=32}
+predictplot(out)
+```
+
+# Bagged Multivariate Adaptive Regression Splines
+
+Bagged Multivariate Adaptive Regression Splines (MARS) is an ensemble machine learning technique that enhances the predictive performance of MARS models. MARS itself is a flexible regression method that captures complex, non-linear relationships by fitting piecewise linear segments (splines) to data, adaptively determining knot locations. Bagging (Bootstrap Aggregating) improves model stability and accuracy by creating multiple random subsets of the training data, training a separate MARS model on each, and then aggregating their predictions—typically by averaging for regression. Therefore, Bagged MARS involves training numerous MARS models on these bootstrapped samples and combining their outputs. This approach primarily offers the benefits of reduced variance (leading to less overfitting), often improved predictive accuracy, and increased robustness to noise compared to a single MARS model.
+
+```{r, eval=FALSE}
+bm <- lapply(dat, FUN = function(x){
+  train(value~., data = na.omit(x[,-10]),
+        method = "bagEarth", tuneLength = 10, trControl = ctrl)
+})
+
+names(bm) <- all_species$Species
+
+for(i in 1:length(dat)) {
+  bm[[i]]$label <-all_species$Label[i]
+}
+
+save(bm, file="../Rdata/allSpp_bm_concentration.rda")
+```
+
+## All species
+
+### Model performance
+
+```{r}
+load("../Rdata/allSpp_bm_concentration.rda")
+ap_bm <- lapply(bm, FUN=function(x)x$results[row.names(x$bestTune),]) %>% ldply(.id="label") 
+
+kable(cbind(Group = all_species$Group, ap_bm), caption = "Accuracy and performance of the best tune SVM model by 10-fold cross validation, repeated 5 times") %>% kable_classic
+```
+
+```{r}
+# Mean R cross-validated R squared
+mu <- round(mean(ap_bm$Rsquared, na.rm=T), 2)
+# Standard deviation
+sdv <- round(sd(ap_bm$Rsquared, na.rm=T), 3)
+
+ggplot(data = cbind(Group = all_species$Group, ap_bm), aes(x=Rsquared, fill=Group))+
+  geom_density(alpha=0.8, position = "stack")+
+  annotate("text", x=0.4, y=25, label =  sprintf("Mean = %.2f\nSD = %.2f", mu, sdv), hjust = 0, vjust = 1, size = 4)+
+  labs(x=expression("Cross-validated"~R^2), y="Density")+
+  theme_bw() %+replace% large
+```
+
+### Variable importance
+
+```{r, fig.width=10, fig.height=8}
+imp <- lapply(bm, FUN = function(x) {
+  data = varImp(x)$importance 
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  return(data)
+  }) %>% ldply %>% pivot_wider(id_cols = ".id", names_from = "var", values_from = "Overall") %>% as.data.frame
+rownames(imp) <- imp$.id
+imp <- imp[,-1]
+imp[is.na(imp)] <- 0
+
+pca <- scale(imp[, -1]) %>% prcomp
+out <- as.data.frame(pca$x)
+out$label <-all_species$Label
+out$Group <- all_species$Group
+lab <- data.frame(pca$rotation*5)
+lab$label <- row.names(lab)
+# Variance explained by PC axes
+a1 <- round(summary(pca)$importance[2,1]*100, 1)
+a2 <- round(summary(pca)$importance[2,2]*100, 1)
+
+ggplot()+
+    geom_label_repel(data=out, aes(x=PC1, y=PC2, label=label, colour=Group), parse = TRUE)+
+    geom_segment(data=lab, aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("black", 0.5))+
+    geom_label_repel(data=lab, aes(x=PC1, y=PC2, label=label), colour="black", fill="transparent", label.padding = unit(0.2, "lines"))+
+    labs(x=paste("PCA1 (", a1, " %)", sep=""), y=paste("PCA2 (", a2, " %)", sep=""))+  
+    theme_bw() %+replace% large
+```
+
+### Variable correlations with model predictions
+
+```{r, fig.width=8.5, fig.height=6.4}
+pred <- lapply(bm, FUN=function(x) cbind(Age_ka = sam$Age_ka, fit = predict(x)) %>% as.data.frame) %>% ldply %>% pivot_wider(names_from = .id, values_from = fit) %>% as.data.frame
+row.names(pred) <- pred$Age_ka
+pca <- pred[,-1] %>% prcomp
+out <- as.data.frame(pca$x)
+out <- cbind(sam[,c("Age_ka", "Period", "Period2")], out)
+
+fit <- envfit(out[, c("PC1", "PC2")], sam[, c("Period", "Period2", "SST", "TOC", "TN", "TP", "TIC", "Dino")])
+
+lab <- data.frame(fit$vectors$arrows*0.2)
+lab$label <- row.names(lab)
+# Variance explained by PC axes
+a1 <- round(summary(pca)$importance[2,1]*100, 1)
+a2 <- round(summary(pca)$importance[2,2]*100, 1)
+
+ggplot()+
+    geom_point(data=out, aes(x=PC1, y=PC2, colour=Period2), size = 3, alpha =0.8)+
+    geom_segment(data=lab, aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("black", 0.5))+
+    geom_label_repel(data=lab, aes(x=PC1, y=PC2, label=label), colour="black", fill="transparent", label.padding = unit(0.2, "lines"))+
+    labs(x=paste("PCA1 (", a1, " %)", sep=""), y=paste("PCA2 (", a2, " %)", sep=""), colour = "Period")+  
+    theme_bw() %+replace% large
+```
+
+## Top indicator species
+
+### Model performance
+
+```{r}
+ap_bm <- lapply(bm[top_species$Species], FUN=function(x)x$results[row.names(x$bestTune),]) %>% ldply(.id="label")
+kable(cbind(Group = top_species$Group, ap_bm), caption = "Only show the top 3 indicator species from each group") %>% kable_classic
+```
+
+```{r}
+# Mean R cross-validated R squared
+mu <- round(mean(ap_bm$Rsquared, na.rm=T), 2)
+# Standard deviation
+sdv <- round(sd(ap_bm$Rsquared, na.rm=T), 3)
+
+ggplot(data = cbind(Group =top_species$Group, ap_bm), aes(x=Rsquared, fill=Group))+
+  geom_density(alpha=0.8, position = "stack")+
+  annotate("text", x=0.4, y=25, label =  sprintf("Mean = %.2f\nSD = %.2f", mu, sdv), hjust = 0, vjust = 1, size = 4)+
+  labs(x=expression("Cross-validated"~R^2), y="Density")+
+  theme_bw() %+replace% large
+```
+
+### Variable importance
+
+```{r, fig.width=24, fig.height=10}
+lapply(bm[top_species$Species], FUN = function(x) {
+  data = varImp(x)$importance 
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  ggplot(data)+
+    geom_bar(aes(x=Overall, y=var), stat = "identity")+
+    labs(y="", title = parse(text=x$label))+theme_bw() %+replace% large
+  }) %>% wrap_plots(ncol=7)
+```
+
+```{r, fig.width=10, fig.height=8}
+imp <- lapply(bm[top_species$Species], FUN = function(x) {
+  data = varImp(x)$importance 
+  data$var <- row.names(data)
+  data$var <- factor(data$var, levels=data$var[order(data$Overall)])
+  return(data)
+  }) %>% ldply %>% pivot_wider(id_cols = ".id", names_from = "var", values_from = "Overall") %>% as.data.frame
+rownames(imp) <- imp$.id
+imp <- imp[,-1]
+imp[is.na(imp)] <- 0
+
+pca <- scale(imp) %>% prcomp
+out <- as.data.frame(pca$x)
+out$label <-top_species$Label
+out$Group <- top_species$Group
+lab <- data.frame(pca$rotation*4)
+lab$label <- row.names(lab)
+# Variance explained by PC axes
+a1 <- round(summary(pca)$importance[2,1]*100, 1)
+a2 <- round(summary(pca)$importance[2,2]*100, 1)
+
+ggplot()+
+    geom_label_repel(data=out, aes(x=PC1, y=PC2, label=label, colour=Group), parse=TRUE)+
+    geom_segment(data=subset(lab, label!="Age_ka"), aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("black", 0.5))+
+    geom_label_repel(data=subset(lab, label!="Age_ka"), aes(x=PC1, y=PC2, label=label), colour="black", fill="transparent", label.padding = unit(0.2, "lines"))+
+    labs(x=paste("PCA1 (", a1, " %)", sep=""), y=paste("PCA2 (", a2, " %)", sep=""))+  
+    theme_bw() %+replace% large
+```
+
+### Variable correlations with model predictions
+
+```{r, fig.width=8.5, fig.height=6.4}
+pred <- lapply(bm[top_species$Species], FUN=function(x) cbind(Age_ka = sam$Age_ka, fit = predict(x)) %>% as.data.frame) %>% ldply %>% pivot_wider(names_from = .id, values_from = fit) %>% as.data.frame
+row.names(pred) <- pred$Age_ka
+pca <- pred[,-1] %>% prcomp
+out <- as.data.frame(pca$x)
+out <- cbind(sam[,c("Age_ka", "Period", "Period2")], out)
+
+fit <- envfit(out[, c("PC1", "PC2")], sam[, c("Period", "Period2", "SST", "TOC", "TN", "TP", "TIC", "Dino")])
+
+lab <- data.frame(fit$vectors$arrows*0.2)
+lab$label <- row.names(lab)
+# Variance explained by PC axes
+a1 <- round(summary(pca)$importance[2,1]*100, 1)
+a2 <- round(summary(pca)$importance[2,2]*100, 1)
+
+ggplot()+
+    geom_point(data=out, aes(x=PC1, y=PC2, colour=Period2), size = 3, alpha =0.8)+
+    geom_segment(data=lab, aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("black", 0.5))+
+    geom_label_repel(data=lab, aes(x=PC1, y=PC2, label=label), colour="black", fill="transparent", label.padding = unit(0.2, "lines"))+
+    labs(x=paste("PCA1 (", a1, " %)", sep=""), y=paste("PCA2 (", a2, " %)", sep=""), colour = "Period")+  
+    theme_bw() %+replace% large
+```
+
+### Partial dependence
+
+```{r, fig.width=24, fig.height=56}
+pd <- lapply(bm[top_species$Species], FUN=function(x){
+  vp = varImp(x)$importance  
+  all <- row.names(vp)[order(-vp$Overall)]
+  grep("Age_Ka|PeriodGlacial|Period2MPT|Period2Post", all)
+  pn <- grep("Age_ka|PeriodGlacial|Period2MPT|Period2Post", all, value=TRUE, invert=TRUE)
+out <- NULL
+for(i in pn){
+  out[[i]] <- partial(x, pred.var = i, grid.resolution = 20) %>% melt(measure.vars = i)
+}
+return(ldply(out, .id="variable"))
+}) 
+
+for(i in 1:length(top_species$Species)) {
+  if(dim(pd[[i]])[1]){
+    pd[[i]]$label <-top_species$Label[i]}
+}
+
+lapply(pd[-4], FUN=function(x){
+  ggplot(x)+
+  geom_line(aes(x=value, y=yhat))+
+  facet_wrap(~variable, scales="free", nrow=1)+
+  labs(x="", y="Partial Dependence", title=parse(text=x$label[1]))+
+  theme_bw() %+replace% large
+}) %>% wrap_plots(nrow=13)
+```
+
+### Prediction
+
+```{r}
+fit <- lapply(bm[top_species$Species], FUN=function(x) predict(x)) %>% unlist
+out <- cbind(ldply(dat[top_species$Species], .id = "variable"), fit) 
+out$label <- factor(out$variable, levels=top_species$Species, labels=top_species$Label)
+out$Group <- factor(out$variable, levels=top_species$Species, labels=top_species$Group)
+```
+
+```{r, fig.width=15, fig.height=15}
+ggplot(out)+
+  geom_point(aes(x=fit, y=value, colour=Group))+
+  facet_wrap(~label, scales="free", labeller = label_parsed)+
+  labs(x="Prediction", y="Observation", colour = "Period")+
+  theme_bw() %+replace% large %+replace% theme(legend.position = "top") + guides(colour = guide_legend(nrow = 1))
+```
+
+```{r, fig.width=25, fig.height=32}
+predictplot(out)
+```
+
+# Ensemble average prediction
+
+The R-squared values from the 10-fold cross-validation indicate that the Random Forest (RF) model has the highest accuracy and performance among the three machine learning algorithms. However, we will calculate the ensemble average of the predictions from RF, Gradient Boosting Machine (GBM), and Bagged Multivariate Adaptive Regression Splines (MARS), weighted by their respective R-squared values from the 10-fold cross-validation.
+
+```{r}
+# Predictions from RF, GBM, and SVM
+x <- cbind(lapply(rf, FUN=function(x)predict(x)) %>% unlist, 
+           lapply(gb, FUN=function(x)predict(x)) %>% unlist, 
+           lapply(bm, FUN=function(x)predict(x)) %>% unlist
+           ) 
+colnames(x) <- c("rf", "gb", "bm")
+
+# R squares of RF, GBM, and MARS
+w <- cbind(ap_rf$Rsquared, ap_gb$Rsquared, ap_bm$Rsquared) 
+colnames(w) <- c("rf", "gb", "bm")
+r2 <- w %>% as.data.frame %>% pivot_longer(cols = c("rf", "gb", "bm"))
+r2$Method <- factor(r2$name, levels=c("rf", "gb", "bm"), labels=c("RF", "GBRM", "MARS"))
+
+ggplot(data = r2, aes(x = value, colour = Method)) +
+  geom_density(linewidth = 1.5)+
+  labs(x=expression("Cross-validated"~R^2), y="Density")+
+  theme_bw() %+replace% large
+
+ggplot(data = r2, aes(y = value, x = Method, fill = Method)) +
+  geom_violin()+
+  labs(y=expression("Cross-validated"~R^2), x="")+
+  theme_bw() %+replace% large
+
+ggplot(data = r2, aes(y = value, x = Method, fill = Method)) +
+  geom_boxplot()+
+  labs(y=expression("Cross-validated"~R^2), x="")+
+  theme_bw() %+replace% large
+
+w <- w[match(lapply(dat, FUN=function(x)x$variable) %>% unlist, ap_rf$label), ]
+
+av <- NULL
+for(i in 1:dim(x)[1]) {
+  av <- c(av, weighted.mean(x[i,], w[i,]))
+}
+
+out <- cbind(ldply(dat, .id = "variable"), fit=av) 
+out$label <- factor(out$variable, levels=all_species$Species, labels=all_species$Label)
+out$Group <- factor(out$variable, levels=all_species$Species, labels=all_species$Group)
+```
+
+```{r, fig.width=15, fig.height=15}
+out <- subset(out, out$variable %in% top_species$Species)
+out$label <- factor(out$variable, levels=top_species$Species, labels=top_species$Label)
+out$Group <- factor(out$variable, levels=top_species$Species, labels=top_species$Group)
+
+ggplot(out)+
+  geom_point(aes(x=fit, y=value, colour=Group))+
+  facet_wrap(~label, scales="free", labeller = label_parsed)+
+  labs(x="Prediction", y="Observation", colour = "Period")+
+  theme_bw() %+replace% large %+replace% theme(legend.position = "top") + guides(colour = guide_legend(nrow = 1))
+```
+
+```{r, fig.width=25, fig.height=32}
+predictplot(out)
+```

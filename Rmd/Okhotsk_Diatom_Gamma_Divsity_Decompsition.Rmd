@@ -1,0 +1,469 @@
+---
+title: "Decomposing Okhotsk Diatom Diversity based on sample coverage"
+author: "Chih-Lin Wei"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###) 
+    toc_float: true
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 2000px !important;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+## import packages
+library(iNEXT.beta3D)
+library(readxl)
+library(dplyr)
+library(plyr)
+library(ggplot2)
+library(ggpattern)
+library(ggrepel)
+library(doBy)
+library(reshape2)
+library(patchwork)
+library(vegan)
+```
+
+# Load data
+
+```{r}
+large <- theme(legend.title = element_text(size=20),
+        legend.text = element_text(size=20),
+        axis.title = element_text(size=20),
+        axis.text = element_text(size=15),
+        strip.text = element_text(size=20))
+vert_x <- theme(axis.text.x.bottom = element_text(angle = 45, hjust = 1, face="italic"))
+no_strip.x <- theme(strip.background.x = element_blank(),
+                  strip.text.x = element_blank())
+no_strip.y <- theme(strip.background.y = element_blank(),
+                  strip.text.y = element_blank())
+no_legend <- theme(legend.position = "none")
+
+# Standard error function
+se <- function(x, ...)sd(x, ...)/sqrt(length(x))
+
+load(file="../Rdata/mis.rda") # Marine Isotope Stage
+load(file="../Rdata/spp.rda") # Raw species count
+load(file="../Rdata/sam.rda") # Sample information
+load(file="../Rdata/div.rda") # Diversity
+```
+
+```{r}
+# Mid-Pleistocene Transition
+mis$Period2 <- cut(mis$End, breaks=c(0, 830, 1230, 1600), labels = c("Post", "MPT", "Pre"), right=FALSE)
+mis$Period2 <- factor(mis$Period2, levels=c("Pre", "MPT", "Post"))
+
+# Interglacial vs. super interglacial
+mis$Period3 <- mis$Period %>% as.character
+mis$Period3[mis$MIS==5|mis$MIS==9|mis$MIS==11|mis$MIS==31|mis$MIS==47|mis$MIS==49] <- "Super interglacial"
+mis$Period3 <- factor(mis$Period3, levels=c("Interglacial", "Super interglacial",	"Glacial"))
+```
+
+# Decomposing diversity using iNterpolation and EXTrapolation based on Hill numbers
+
+We used Hill numbers to decompose gamma diversity into alpha and beta components based on [Whittaker's (1960)](https://doi.org/10.2307/1943563) multiplicative rule. In the analysis, the gamma diversity represents the effective number of species in the entire assemblage. The alpha diversity reflects the mean joint diversity or the effective number of species-assemblage combinations per actual assemblage. The beta diversity the ratio of gamma to alpha diversities, quantifying the effective number of assemblages based on (unweighted) species raw abundance datasets, ranging from 1 to N, where $beta = 1$ indicates identical species raw abundance datasets across assemblages (i.e., only one assemblage), and $beta = N$ indicates no shared species among assemblages (i.e., N assemblages).  
+
+The beta diversity can be normalized into four classes of differentiation measures (or dissimilarity) ranging from zero to one, assessing local overlap, regional overlap, homogeneity, and turnover. We use $1-C$, the standardized Sørensen-type non-overlap index, which measures the average proportion of non-shared species in an assemblage and corresponds to the classic Sørensen, Horn, and Morisita-Horn dissimilarities for $q = 0, 1$, and $2$ , respectively. 
+
+Other dissimilarity indexes include standardized Jaccard-type non-overlap index, $1-U$, represents the proportion of non-shared species in the pooled assemblage. Standardized Sørensen-type turnover index, $1-V$, captures species turnover relative to alpha diversity. Standardized Jaccard-type turnover index, $1-S$, measures species turnover relative to gamma diversity.  
+
+All diversity and dissimilarity measures were standardized using sample coverage (=95%) derived from the interpolation and extrapolation of Hill numbers accumulation curves, based on 1000 bootstrap resampling. The mean and 95% confidence interval of the bootstrap estimates are reported.
+
+For more details, see [Chao et al. (2023)](https://doi.org/10.1002/ecm.1588), [Chao et al. (2019)](https://doi.org/10.1111/2041-210X.13233), [Chiu et al. (2014)](https://doi.org/10.1890/12-0960.1), and [Chao et al. (2016)](https://link.springer.com/chapter/10.1007/978-3-319-22461-9_8).
+
+# Gamma, alpha, and beta diversity for each MIS stage
+
+```{r}
+# Split the census data into list of MIS stage
+dl <- splitBy(~MIS, cbind(MIS=sam$MIS, spp), omit = FALSE) %>% lapply(FUN = function(x)x[,-1])
+dl <- dl[match(levels(sam$MIS), names(dl))]
+
+# Remove species with zero abundance
+dl <- lapply(dl, FUN = function(x) x[rowSums(x)!=0, colSums(x)!=0])
+
+# zero abundance
+zero <- lapply(dl, FUN=sum) %>% unlist == 0
+
+# with only 1 sample
+only1 <- lapply(dl, FUN=function(x)dim(x)[1]) %>% unlist == 1
+
+# Convert to species as rows and age as columns
+dl <- lapply(dl[!(zero|only1)], FUN=function(x)t(x))
+```
+
+```{r, eval=FALSE}
+# Test run to show maximum sample coverage in each region
+test <- iNEXTbeta3D(data = dl, q = 0, nboot = 0)
+save(test, file="../RData/mis_test.rda")
+```
+
+```{r}
+load(file="../RData/mis_test.rda")
+maxSC <- lapply(test, FUN = function(x){
+  lapply(x, FUN = function(y) {
+    names(y)[5] <- "Measure"
+    y[dim(y)[1],] # Maximum sample coverage
+    }) %>% ldply
+  })
+
+# Minimum values the max sample coverage
+lapply(maxSC, FUN=function(x)min(x$SC)) %>% unlist %>% hist(main = "Max sample coverage from MIS stages")
+```
+  
+The sample coverage can be standardized to 0.95.  
+
+```{r, eval = FALSE}
+# It seems that we may set the sample coverage to 0.95 
+# nboot should change to 1000
+est <- iNEXTbeta3D(data = dl, q = c(0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2), level = 0.95, nboot = 1000)
+save(est, file="../RData/mis_div_decomp.rda")
+```
+
+```{r}
+load("../RData/mis_div_decomp.rda")
+dat <- lapply(est, FUN = function(x){
+  lapply(x, FUN = function(y){
+    names(y)[5] <- "value"
+    return(y)
+  }) %>% ldply
+}) %>% ldply
+
+dat <- cbind(dat, mis[match(dat$Dataset, mis$MIS),])
+```
+
+```{r}
+divplot <- function(data, ylab) {
+  ## Descriptive statistics by MIS stages
+  # Top x-axis
+  ax2 <- subset(mis, Period=="Interglacial")
+
+  # Minimum and maximum ranges of each panel
+  ci_range <- data[, c("Order.q", "LCL", "UCL")] %>% melt(id.var="Order.q", variable.name="range") # min and max values of 95% CI 
+  p_range <- rbind(ci_range[,-2], data[, c("Order.q", "value")]) # combine 95% CI with the Hill numbers
+
+  ax3 <- lapply(splitBy(~Order.q, p_range, omit = FALSE), FUN=function(x)cbind(ax2, ymin=min(x$value, na.rm=T), ymax=max(x$value, na.rm=T))) %>% ldply(.id="Order.q")
+  ax3$label <- factor(ax3$Order.q, labels= labs)
+
+  # Mid-Pleistocene Transition
+  mpt <- c(Start=830, End=1230) %>% as.data.frame %>% t
+  mpt <- lapply(splitBy(~Order.q, p_range, omit = FALSE), FUN=function(x)cbind(mpt, ymin=min(x$value, na.rm=T), ymax=max(x$value, na.rm=T))) %>% ldply(.id="Order.q")
+  mpt$label <- factor(mpt$Order.q, labels= labs)
+  
+  ggplot()+
+  geom_rect_pattern(data=mpt, aes(xmin=Start, xmax=End, ymin=ymin, ymax=ymax), pattern="stripe", pattern_alpha = 0.1, fill="transparent", pattern_density = 0.3, colour="black", linetype = 4)+
+  geom_rect(data=ax3, aes(xmin=Start, xmax=End, ymin=ymin, ymax=ymax), fill="gray", colour="transparent", alpha=0.2)+
+  geom_rect(data=data, aes(xmin=Start, xmax=End, ymin=LCL, ymax=UCL, fill=Period), alpha=0.6)+
+  geom_segment(data=data, aes(x=Start, y=value, xend=End, yend=value, color=Period), alpha=1, linewidth=1)+
+  labs(x = "Age (Ka)", y = ylab)+
+  scale_fill_viridis_d(direction = -1)+
+  scale_colour_viridis_d(direction = -1)+
+  scale_x_reverse(expand=expansion(mult = 0.01), breaks=seq(0, 1550, 50), sec.axis = sec_axis(~.*1, breaks = with(ax2, (Start+End)/2), labels = ax2$MIS))+
+  scale_y_continuous(expand = expansion(mult = 0.01))+
+  facet_wrap(~label, labeller = label_parsed, ncol = 1, scales = "free_y", strip.position="right")+
+  theme_bw()%+replace% large %+replace% vert_x
+}
+```
+
+## Gamma diversity
+
+```{r, fig.height=10, fig.width=15}
+dat2 <- subset(dat, .id=="gamma" & (Order.q==0|Order.q==1|Order.q==2)) 
+labs <- c(expression(""^0*italic(D[gamma])), expression(""^1*italic(D[gamma])), expression(""^2*italic(D[gamma])))
+dat2$label <- factor(dat2$Order.q, labels= labs)
+divplot(dat2, "Diatom Gamma Diversity")
+```
+
+Fig.x. Gamma diversities base on 95% sample coverage among MIS stages. Horizontal lines show the mean diversity estimate and shaded areas show 95% confidence intervals from 1000 bootstrap resampling. The oblique striped area shows Mid-Pleistocene Transition (MPT).
+
+## Alpha diversity
+
+```{r, fig.height=10, fig.width=15}
+dat2 <- subset(dat, .id=="alpha" & (Order.q==0|Order.q==1|Order.q==2)) 
+labs <- c(expression(""^0*italic(D[alpha])), expression(""^1*italic(D[alpha])), expression(""^2*italic(D[alpha])))
+dat2$label <- factor(dat2$Order.q, labels= labs)
+divplot(dat2, "Diatom Alpha Diversity")
+```
+
+Fig.x. Alpha diversities base on 95% sample coverage among MIS stages. Horizontal lines show the mean diversity estimate and shaded areas show 95% confidence intervals from 1000 bootstrap resampling. The oblique striped area shows Mid-Pleistocene Transition (MPT).
+
+## Beta diversity
+
+```{r, fig.height=10, fig.width=15}
+dat2 <- subset(dat, .id=="beta" & (Order.q==0|Order.q==1|Order.q==2)) 
+labs <- c(expression(""^0*italic(D[beta])), expression(""^1*italic(D[beta])), expression(""^2*italic(D[beta])))
+dat2$label <- factor(dat2$Order.q, labels= labs)
+divplot(dat2, "Diatom Beta Diversity")
+```
+
+Fig.x. Beta diversities base on 95% sample coverage among MIS stages. Horizontal lines show the mean diversity estimate and shaded areas show 95% confidence intervals from 1000 bootstrap resampling. The oblique striped area shows Mid-Pleistocene Transition (MPT).
+
+# Dissimilarity
+
+```{r, fig.height=10, fig.width=15}
+dat2 <- subset(dat, .id=="1-C" & (Order.q==0|Order.q==1|Order.q==2)) 
+labs <- c("Sørensen", "Horn", "Morisita-Horn")
+dat2$label <- factor(dat2$Order.q, labels= labs)
+divplot(dat2, "Standardized Sørensen-type non-overlap index (1-C)")
+```
+
+Fig.x. Dissimilarities base on 95% sample coverage among MIS stages. Horizontal lines show the mean diversity estimate and shaded areas show 95% confidence intervals from 1000 bootstrap resampling. The oblique striped area shows Mid-Pleistocene Transition (MPT).
+
+# Gamma, alpha, and beta diversity for glacial/interglacial in pre-MPT, MPT, and post-MPT
+
+```{r}
+# Split the census data into list of west and east
+dl <- splitBy(~Period2+Period, cbind(sam[, c("Period", "Period2")], spp), omit = FALSE) %>% lapply(FUN = function(x)x[,-1:-2])
+
+# Remove species with zero abundance
+dl <- lapply(dl, FUN = function(x) x[rowSums(x)!=0, colSums(x)!=0])
+
+# Convert to species as rows and age as columns
+dl <- lapply(dl, FUN=function(x)t(x))
+```
+
+```{r, eval=FALSE}
+# Test run to show maximum sample coverage in each region
+test <- iNEXTbeta3D(data = dl, q = 0, nboot = 0)
+save(test, file="../RData/gig_test.rda")
+```
+
+```{r}
+load(file="../RData/gig_test.rda")
+maxSC <- lapply(test, FUN = function(x){
+  lapply(x, FUN = function(y) {
+    names(y)[5] <- "Measure"
+    y[dim(y)[1],] # Maximum sample coverage
+    }) %>% ldply
+  })
+
+# Minimum values the max sample coverage
+lapply(maxSC, FUN=function(x)min(x$SC)) %>% unlist %>% hist(main = "Max sample coverage from samples")
+```
+
+The sample coverage can be set to maximum (=1).  
+
+```{r, eval = FALSE}
+# It seems that we may set the sample coverage to 0.95 
+# nboot should change to 1000
+est <- iNEXTbeta3D(data = dl, q = c(0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2), level = 0.95, nboot = 1000)
+save(est, file="../RData/gig_div_decomp.rda")
+```
+
+```{r}
+load("../RData/gig_div_decomp.rda")
+dat <- lapply(est, FUN = function(x){
+  lapply(x, FUN = function(y){
+    names(y)[5] <- "value"
+    return(y)
+  }) %>% ldply
+}) %>% ldply
+
+fr <- strsplit(dat$Dataset, split="[|]") %>% ldply
+dat$Period <- fr$V2
+dat$Period <- factor(dat$Period, levels=c("Interglacial",	"Glacial"))
+dat$Period2 <- fr$V1
+dat$Period2 <- factor(dat$Period2, levels=c("Pre", "MPT", "Post"))
+dat$.id <- factor(dat$.id, levels=c("gamma", "alpha", "beta", "1-C", "1-U", "1-V", "1-S"))
+```
+
+## Diversity
+
+```{r, fig.height=8, fig.width=12}
+library(Hmisc)
+
+lapply(group_split(dat, .id)[1:3], function(x){
+  ggplot(data=x,
+       aes(x = Order.q, y = value, ymax = UCL, ymin = LCL, colour = Period, fill = Period, group=Dataset))+
+  geom_line()+
+  geom_ribbon(alpha = 0.5)+
+  labs(y=paste(as.character(x$.id)[1] %>% capitalize, "Diversity"), colour = "Period", fill = "Period")+
+  scale_fill_viridis_d(direction = -1)+
+  scale_colour_viridis_d(direction = -1)+
+  facet_wrap(~Period2)+
+  theme_bw() %+replace% large
+}) %>% wrap_plots(ncol=1)
+```
+
+Fig.x. Diversity profiles base on 95% sample coverage between interglacial and glacial periods. Solid lines show the mean diversity estimate and shaded areas show 95% confidence intervals from 1000 bootstrap resampling. The oblique striped area shows Mid-Pleistocene Transition (MPT). During the pre-MPT and MPT, gamma and alpha diversities were significantly higher in interglacial periods compared to glacial periods. Additionally, the beta diversities, which reflect variation in species composition, were also more pronounced during interglacial periods, especially for higher orders of q (>=1) and for abundant or very abundant species. However, in the post-MPT phase, these diversity trends reversed. Gamma and alpha diversities became significantly higher during glacial periods than during interglacial periods. Similarly, beta diversities showed a significant increase during glacial periods compared to interglacial periods.
+
+```{r, fig.height=12, fig.width=12}
+p1 <- ggplot(sam)+
+  geom_boxplot(aes(x=Period2, y=SST, fill=Period))+
+  labs(x="", y=expression(Sea~surface~temperature~(degree~C)))+
+  theme_bw() %+replace% large
+
+p2 <- ggplot(sam)+
+  geom_boxplot(aes(x=Period2, y=TN, fill=Period))+
+  labs(x="", y=expression(Total~Nitrogen~(mol/kg)))+
+  scale_y_log10()+
+  theme_bw() %+replace% large
+
+p3 <- ggplot(sam)+
+  geom_boxplot(aes(x=Period2, y=TP, fill=Period))+
+  labs(x="", y=expression(Total~Phosphate~(mol/kg)))+
+  scale_y_log10()+
+  theme_bw() %+replace% large
+
+p1/p2/p3
+```
+
+Fig.x. Box plots for sea surface temperature, total nitrogen, and total phosphate.  Diversity patterns flip after MPT. Perhaps having something to do with the range of SST or TN?
+
+## Dissimilarity
+
+```{r, fig.height=8, fig.width=12}
+library(Hmisc)
+
+lapply(group_split(dat, .id)[4:7], function(x){
+  ggplot(data=x,
+       aes(x = Order.q, y = value, ymax = UCL, ymin = LCL, colour = Period, fill = Period, group=Dataset))+
+  geom_line()+
+  geom_ribbon(alpha = 0.5)+
+  labs(y=as.character(x$.id)[1], colour = "Period", fill = "Period")+
+  scale_fill_viridis_d(direction = -1)+
+  scale_colour_viridis_d(direction = -1)+
+  facet_wrap(~Period2)+
+  theme_bw() %+replace% large
+}) %>% wrap_plots(ncol=1)
+```
+
+Fig.x. Dissimilarity profiles base on 95% sample coverage between interglacial and glacial periods. Solid lines show the mean diversity estimate and shaded areas show 95% confidence intervals from 1000 bootstrap resampling. The oblique striped area shows Mid-Pleistocene Transition (MPT).
+
+# Gamma, alpha, and beta diversity for glcial/interglacial/super-interglacial in pre-MPT, MPT, and post-MPT
+
+```{r}
+# Split the census data into list of west and east
+dl <- splitBy(~Period2+Period3, cbind(sam[, c("Period2", "Period3")], spp), omit = FALSE) %>% lapply(FUN = function(x)x[,-1:-2])
+
+# Remove species with zero abundance
+dl <- lapply(dl, FUN = function(x) x[rowSums(x)!=0, colSums(x)!=0])
+
+# Convert to species as rows and age as columns
+dl <- lapply(dl, FUN=function(x)t(x))
+```
+
+```{r, eval=FALSE}
+# Test run to show maximum sample coverage in each region
+test <- iNEXTbeta3D(data = dl, q = 0, nboot = 0)
+save(test, file="../RData/sig_test.rda")
+```
+
+```{r}
+load(file="../RData/sig_test.rda")
+maxSC <- lapply(test, FUN = function(x){
+  lapply(x, FUN = function(y) {
+    names(y)[5] <- "Measure"
+    y[dim(y)[1],] # Maximum sample coverage
+    }) %>% ldply
+  })
+
+# Minimum values the max sample coverage
+lapply(maxSC, FUN=function(x)min(x$SC)) %>% unlist %>% hist(main = "Max sample coverage from samples")
+```
+
+The sample coverage can be set to maximum (=1).  
+
+```{r, eval = FALSE}
+# It seems that we may set the sample coverage to 0.95 
+# nboot should change to 1000
+est <- iNEXTbeta3D(data = dl, q = c(0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2), level = 0.95, nboot = 10ㄧㄧ00)
+save(est, file="../RData/sig_div_decomp.rda")
+```
+
+```{r}
+load("../RData/sig_div_decomp.rda")
+dat <- lapply(est, FUN = function(x){
+  lapply(x, FUN = function(y){
+    names(y)[5] <- "value"
+    return(y)
+  }) %>% ldply
+}) %>% ldply
+
+fr <- strsplit(dat$Dataset, split="[|]") %>% ldply
+dat$Period <- fr$V2
+dat$Period <- factor(dat$Period, levels=c("Super interglacial", "Interglacial",	"Glacial"))
+dat$Period2 <- fr$V1
+dat$Period2 <- factor(dat$Period2, levels=c("Pre", "MPT", "Post"))
+dat$.id <- factor(dat$.id, levels=c("gamma", "alpha", "beta", "1-C", "1-U", "1-V", "1-S"))
+```
+
+## Diversity
+
+```{r, fig.height=10, fig.width=10}
+library(Hmisc)
+
+panel <- c("(a)", "(b)", "(c)")
+names(panel) <- c("gamma", "alpha", "beta")
+
+lapply(group_split(dat, .id)[1:3], function(x){
+  ggplot(data=x,
+       aes(x = Order.q, y = value, ymax = UCL, ymin = LCL, colour = Period, fill = Period, group=Dataset))+
+  geom_line()+
+  geom_ribbon(alpha = 0.5)+
+  labs(y=paste(as.character(x$.id)[1] %>% capitalize, "Diversity"), colour = "Period", fill = "Period", title = panel[x$.id[1]])+
+  scale_fill_viridis_d(direction = -1)+
+  scale_colour_viridis_d(direction = -1)+
+  facet_wrap(~Period2)+
+  theme_bw() %+replace% large 
+}) %>% wrap_plots(ncol=1, guides = "collect", axes = "collect") 
+```
+
+Fig.x. Diversity profiles base on 95% sample coverage among super-interglacial, interglacial, and glacial periods. Solid lines show the mean diversity estimate and shaded areas show 95% confidence intervals from 1000 bootstrap resampling. The oblique striped area shows Mid-Pleistocene Transition (MPT).
+
+```{r, fig.height=12, fig.width=12}
+sam$Period3 <- factor(sam$Period3, levels=c("Super interglacial", "Interglacial",	"Glacial"))
+
+p1 <- ggplot(sam)+
+  geom_boxplot(aes(x=Period2, y=SST, fill=Period3))+
+  labs(x="", y=expression(Sea~surface~temperature~(degree~C)))+
+  theme_bw() %+replace% large
+
+p2 <- ggplot(sam)+
+  geom_boxplot(aes(x=Period2, y=TN, fill=Period3))+
+  labs(x="", y=expression(Total~Nitrogen~(mol/kg)))+
+  scale_y_log10()+
+  theme_bw() %+replace% large
+
+p3 <- ggplot(sam)+
+  geom_boxplot(aes(x=Period2, y=TP, fill=Period))+
+  labs(x="", y=expression(Total~Phosphate~(mol/kg)))+
+  scale_y_log10()+
+  theme_bw() %+replace% large
+
+p1/p2/p3
+```
+
+Fig.x. Box plots for sea surface temperature.  
+
+## Dissimilarity
+
+```{r, fig.height=8, fig.width=12}
+library(Hmisc)
+
+lapply(group_split(dat, .id)[4:7], function(x){
+  ggplot(data=x,
+       aes(x = Order.q, y = value, ymax = UCL, ymin = LCL, colour = Period, fill = Period, group=Dataset))+
+  geom_line()+
+  geom_ribbon(alpha = 0.5)+
+  labs(y=as.character(x$.id)[1], colour = "Period", fill = "Period")+
+  scale_fill_viridis_d(direction = -1)+
+  scale_colour_viridis_d(direction = -1)+
+  facet_wrap(~Period2, scales = "free_y")+
+  theme_bw() %+replace% large
+}) %>% wrap_plots(ncol=1)
+```
+
+Fig.x. Dissimilarity profiles base on 95% sample coverage among super-interglacial, interglacial, and glacial periods. Solid lines show the mean diversity estimate and shaded areas show 95% confidence intervals from 1000 bootstrap resampling. The oblique striped area shows Mid-Pleistocene Transition (MPT).

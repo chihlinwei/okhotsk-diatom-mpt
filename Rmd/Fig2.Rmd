@@ -1,0 +1,130 @@
+---
+title: "Figure 2 remake"
+author: "Chih-Lin Wei"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###) 
+    toc_float: true
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 2000px !important;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+## import packages
+library(tidyverse)
+library(ggpattern)
+library(plyr)
+library(ggrepel)
+library(patchwork)
+library(vegan)
+library(cowplot)
+```
+
+# ggplot theme setting
+
+```{r}
+# plot setting
+large <- theme(legend.title = element_text(size=30),
+        legend.text = element_text(size=30),
+        axis.title = element_text(size=30),
+        axis.text.x.top = element_text(size = 30),
+        axis.text.x.bottom = element_text(size = 30),
+        axis.text.y = element_text(size = 20),
+        axis.text = element_text(size=30),
+        strip.text = element_text(size=30))
+vert_x <- theme(axis.text.x.bottom = element_text(angle = 45, hjust = 1, face="italic"))
+no_strip.x <- theme(strip.background.x = element_blank(),
+                  strip.text.x = element_blank())
+no_strip.y <- theme(strip.background.y = element_blank(),
+                  strip.text.y = element_blank())
+no_legend <- theme(legend.position = "none")
+
+# Standard error function
+se <- function(x, ...)sd(x, ...)/sqrt(length(x))
+
+load(file="../Rdata/mis.rda") # Marine Isotope Stage
+load(file="../Rdata/spp.rda") # Raw species count
+load(file="../Rdata/sam.rda") # Sample information
+load(file="../Rdata/div.rda") # Diversity
+zero <- rowSums(spp)==0 # The sample with zero count
+
+cluster <- cbind(
+  Start = c(4, 200, 832, 1138, 1435),
+  End = c(200, 832, 1138, 1434, 1551),
+  Period = c(1, 2, 1, 2, 1)
+) %>% as.data.frame
+
+cluster <- cbind(Cluster = factor(c("D5", "D4", "D3", "D2", "D1"), levels = c("D5", "D4", "D3", "D2", "D1")), cluster)
+```
+
+```{r}
+openwater <- c("Actinocyclus curvatulus",	"Actinocyclus ochotensis", 	"Asteromphalus brookei", "Coscinodiscus oculus-iridis", 	"Coscinodiscus tabularis var. egregius", "Rhizosolenia hebetata")
+productivity <- c("Chaetoceros sp1",	"Coscinodiscus marginatus",	"Porosira glacialis",	"Shionodiscus trifultus (Thalassiosira trifulta)",	"Thalassiothrix longissima")
+seaice <- c("Bacterosira bathyomphala (Bacterosira fragilis)",	"Fragilariopsis cylindrus (Nitzschia cylindra)",	"Thalassiosira antarctica",	"Thalassiosira nordenskioeldii")
+periphytic <- c("Chaetoceros septentrionalis",	"Diploneis smithii",	"Melosira sol",	"Paralia sulcata",	"Pseudopodosira elegans",	"Rhaphoneis surirella")
+keep <- c(openwater, productivity, seaice, periphytic)
+group <- c(rep("OW", 6), rep("PD", 5), rep("SI", 4), rep("PP", 6)) 
+dat <- decostand(spp, method = "total", MARGIN = 1, na.rm=TRUE)[, keep]
+```
+
+```{r}
+dat <- cbind(sam[, c("depth_cm", "Age_ka")], dat) %>% pivot_longer(cols = keep, names_to = "Species")
+dat <- cbind(dat[,1:2], "Group" = group[match(dat$Species, keep)], dat[,3:4])
+dat$Label <- sub(" ", "~~", paste("italic(", sub(" *\\(.*| *\\var. egregius.*", "", dat$Species), ")", sep="")) 
+dat$Group <- factor(dat$Group, levels = c("OW", "PD", "SI", "PP"))
+dat$value[is.na(dat$value)]<- 0
+dat <- dat %>% group_split(Group)
+```
+
+
+```{r}
+# Legend as an independent panel
+key.col <- c(OW="#d1aa15", PD="#21918c", SI="#3b528b", PP="#440154")
+p <- ggplot(data.frame(Group = names(key.col)), aes(x=NA, y=NA, colour = Group)) +
+  geom_line(size = 5) +
+  scale_colour_manual(values = key.col, breaks = names(key.col), labels=c("Open water", "Productivity", "Sea ice", "Periphytic")) +
+  theme_void() %+replace% theme(legend.title = element_text(size=30), legend.text = element_text(size=35), legend.position = "top")
+legend_plot <- get_legend(p) %>% ggdraw
+```
+
+```{r}
+# Top x-axis
+  ax2 <- subset(cluster, Period==2)
+
+# Mid-Pleistocene Transition
+mpt <- data.frame(xmin = 830, xmax = 1230, ymin = -Inf, ymax = Inf)
+
+
+p <- lapply(dat, FUN=function(x){
+  ggplot()+
+    geom_rect_pattern(data= mpt, aes(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax), pattern="stripe", pattern_alpha = 0.1, fill="transparent", pattern_density = 0.01, colour="black", linetype = 4)+
+    geom_rect(data=ax2, aes(xmin=Start, xmax=End, ymin=-Inf, ymax=Inf), fill="gray", colour="transparent", alpha=0.2)+
+  geom_line(data=x, aes(x=Age_ka, y=value*100, colour=Group), alpha = 0.7, linewidth=1.2)+
+    labs(x = "Age (ka)", y = "Diatom relative abundance (%)")+
+  scale_colour_manual(values = c("#d1aa15", "#21918c", "#3b528b", "#440154")[as.numeric(x$Group)[1]])+
+  scale_x_reverse(expand=expansion(mult = 0.01), breaks=seq(0, 1550, 100), sec.axis = sec_axis(~.*1, breaks = with(cluster, (Start+End)/2), labels = cluster$Cluster))+
+  scale_y_continuous(expand = expansion(mult = 0.01))+
+  facet_wrap(~Label, labeller = label_parsed, scales = "free_y", ncol=1)+
+  theme_bw()%+replace% large %+replace% vert_x %+replace% theme(legend.position = "none") + guides(colour = guide_legend(nrow = 1))
+}) %>% wrap_plots(ncol=2, nrow =2, guides = "collect", axes = "collect")
+```
+
+```{r, fig.height=26, fig.width=20}
+legend_plot+p+plot_layout(heights = c(1, 10))
+```
+
+
+

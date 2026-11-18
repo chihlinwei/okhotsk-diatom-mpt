@@ -1,0 +1,381 @@
+---
+title: "Okhotsk Diatom Beta Diversity Partition"
+author: "Chih-Lin Wei"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###) 
+    toc_float: true
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 2000px !important;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+library(readxl)
+library(dplyr)
+library(plyr)
+library(ggplot2)
+library(ggpattern)
+library(reshape2)
+library(doBy)
+library(knitr)
+library(kableExtra)
+
+large <- theme(legend.title = element_text(size=20),
+        legend.text = element_text(size=20),
+        axis.title = element_text(size=20),
+        axis.text = element_text(size=20),
+        strip.text = element_text(size=20))
+vert_x <- theme(axis.text.x.bottom = element_text(angle = 45, hjust = 1, face="italic"))
+no_strip.x <- theme(strip.background.x = element_blank(),
+                  strip.text.x = element_blank())
+no_strip.y <- theme(strip.background.y = element_blank(),
+                  strip.text.y = element_blank())
+no_legend <- theme(legend.position = "none")
+
+load(file="../Rdata/mis.rda") # Marine Isotope Stage
+load(file="../Rdata/spp.rda") # Raw species count
+load(file="../Rdata/sam.rda") # Sample information
+zero <- rowSums(spp)==0 # The sample with zero count
+
+spp <- spp[!zero,]
+sam <- sam[!zero,]
+```
+
+# Partioning Sorensen dissimilarities into turnover and nestedness components 
+
+We separated the total Sorensen dissimilarities into species turnover and nestedness components using the algorithms developed by Baselga ([2010]( https://doi.org/10.1111/j.1466-8238.2009.00490.x), [2012]( https://doi.org/10.1111/j.1466-8238.2011.00756.x)). We fit distance decay models to pairwise assemblage dissimilarities, including their turnover and nestedness components, as well as the total dissimilarities. The exponential models were fitted using the Levenberg-Marquardt Nonlinear Least-Squares Algorithm ([Gómez-Rodríguez & Baselga, 2018](https://doi.org/10.1111/ecog.03693); [Martínez-Santalla et al., 2022](https://doi.org/10.1111/jbi.14351); [Martín-Devasa et al., 2022]( https://doi.org/10.1111/ddi.13550)). The significance of the models was estimated through 999 permutations. The pairwise dissimilarities between pre-MPT and MPT samples, between MPT and post-MPT samples, and between pre-MPT and post-MPT samples, as well as among the Pre-MPT samples, MPT samples, and post-MPT samples were decomposed, respectively. 
+
+## Pairwise dissimilarities between pre-MPT and MPT
+
+```{r}
+library(betapart)
+library(vegan)
+
+pos <- which(sam$Period2=="Post")
+
+# Partioning Sorensen dissimilarities
+be <- beta.pair(spp[-pos,] %>% decostand("pa"))
+
+bd <- list()
+bd$beta.sim$lab <- c("(a)", "Species turnover")
+bd$beta.sim$dis <- be$beta.sim
+bd$beta.sne$lab <- c("(b)", "Nestedness")
+bd$beta.sne$dis <- be$beta.sne
+bd$beta.sor$lab <- c("(c)", "Total dissimilarity")
+bd$beta.sor$dis <- be$beta.sor
+
+pre <- which(sam[-pos, "Period2"]=="Pre")
+mpt <- which(sam[-pos, "Period2"]=="MPT")
+```
+
+```{r, fig.height=5, fig.width=12}
+library(patchwork)
+
+p1 <- lapply(bd, FUN=function(x){
+  dis <- as.matrix(x$dis)
+  dis[pre, pre] <- NA # Set dissimilarities among pre-MPT samples to NA
+  dis[mpt, mpt] <- NA # Set dissimilarities among MPT samples to NA
+  ydis <- as.dist(dis)
+  
+  dis <- as.matrix(dist(sam[-pos, "Age_ka"]))
+  xdis <- as.dist(dis)
+  
+  # Fit an exponential decay model
+  f <- decay.model(ydis,  xdis, y.type = "dissimilarities", perm = 999)
+  
+  # Extract coefficients
+  p <- round(f$p.value, 3)
+  r2 <- round(f$pseudo.r.squared, 3)
+  a <- round(f$first.parameter, 2) %>% as.vector
+  b <- round(f$second.parameter, 4) %>% as.vector
+  
+  # Exponential equation
+  eq <- bquote(y == .(a) ~ e^{.(b) * x}*"," ~ p==.(p))
+  
+  dat <- cbind(x = xdis  , y = ydis) %>% na.omit %>% as.data.frame
+  ggplot(data = dat, aes(x=x, y=y))+
+    geom_point()+
+    annotate("text", x=400, y=0.75, label=as.expression(eq) %>% as.character, parse=T, colour="red")+
+    labs(x="", y=x$lab[2], title=x$lab[1])+
+    ylim(0, 0.75)+
+    stat_smooth(method = "nls", formula = y ~ a * exp(b * x),
+              method.args = list(start = list(a = a, b = b)), 
+              se = FALSE, color = "red")+
+    theme_bw() %+replace% large
+}) %>% wrap_plots
+```
+
+## Pairwise dissimilarities between MPT and post-MPT
+
+```{r}
+pre <- which(sam$Period2=="Pre")
+
+# Partioning Sorensen dissimilarities
+be <- beta.pair(spp[-pre,] %>% decostand("pa"))
+
+bd <- list()
+bd$beta.sim$lab <- c("(d)", "Species turnover")
+bd$beta.sim$dis <- be$beta.sim
+bd$beta.sne$lab <- c("(e)", "Nestedness")
+bd$beta.sne$dis <- be$beta.sne
+bd$beta.sor$lab <- c("(f)", "Total dissimilarity")
+bd$beta.sor$dis <- be$beta.sor
+
+pos <- which(sam[-pre, "Period2"]=="Post")
+mpt <- which(sam[-pre, "Period2"]=="MPT")
+```
+
+```{r, fig.height=5, fig.width=12}
+p2 <- lapply(bd, FUN=function(x){
+  dis <- as.matrix(x$dis)
+  dis[pos, pos] <- NA # Set dissimilarities among post-MPT samples to NA
+  dis[mpt, mpt] <- NA # Set dissimilarities among MPT samples to NA
+  ydis <- as.dist(dis)
+  
+  dis <- as.matrix(dist(sam[-pre, "Age_ka"]))
+  xdis <- as.dist(dis)
+  
+  # Fit an exponential decay model
+  f <- decay.model(ydis,  xdis, y.type = "dissimilarities", perm = 999)
+  
+  # Extract coefficients
+  p <- round(f$p.value, 3)
+  r2 <- round(f$pseudo.r.squared, 3)
+  a <- round(f$first.parameter, 2) %>% as.vector
+  b <- round(f$second.parameter, 3) %>% as.vector
+  
+  # Exponential equation
+  eq <- bquote(y == .(a) ~ e^{.(b) * x}*"," ~ p==.(p))
+  
+  dat <- cbind(x = xdis  , y = ydis) %>% na.omit %>% as.data.frame
+  ggplot(data = dat, aes(x=x, y=y))+
+    geom_point()+
+    annotate("text", x=400, y=0.8, label=as.expression(eq) %>% as.character, parse=T, colour="red")+
+    labs(x="Age difference (kyr)", y=x$lab[2], title=x$lab[1])+
+    ylim(0, 0.8)+
+    stat_smooth(method = "nls", formula = y ~ a * exp(b * x),
+              method.args = list(start = list(a = a, b = b)), 
+              se = FALSE, color = "red")+
+    theme_bw() %+replace% large
+}) %>% wrap_plots(axes="collect")
+```
+
+```{r, fig.height=10, fig.width=12}
+p1/p2
+```
+
+Fig. X. Decomposition of pairwise Sørensen dissimilarities. (a) Species turnover between pre-MPT and MPT, (b) Nestedness between pre-MPT and MPT, (c) total dissimilarity between pre-MPT and MPT, (d) species turnover between MPT and post-MPT, (e) Nestedness between MPT and post-MPT, (f) total dissimilarity between MPT and post-MPT. The results indicate that the pairwise Sorensen dissimilarity between the Pre-MPT and MPT samples is dominated by species turnover. The species turnover and Sorensen dissimilarities significantly increase with the age difference. Similarly, the species turnover also dominates the pairwise Sorensen dissimilarity between the MPT and post-MPT samples; however, none of the turnover, nestedness, and total dissimilarities vary with the age difference between the MPT and post-MPT samples.
+
+## Pairwise dissimilarities between pre-MPT and post-MPT
+
+```{r}
+library(betapart)
+library(vegan)
+
+mpt <- which(sam$Period2=="MPT")
+
+# Partioning Sorensen dissimilarities
+be <- beta.pair(spp[-mpt,] %>% decostand("pa"))
+
+bd <- list()
+bd$beta.sim$lab <- c("(a)", "Species turnover")
+bd$beta.sim$dis <- be$beta.sim
+bd$beta.sne$lab <- c("(b)", "Nestedness")
+bd$beta.sne$dis <- be$beta.sne
+bd$beta.sor$lab <- c("(c)", "Total dissimilarity")
+bd$beta.sor$dis <- be$beta.sor
+
+pre <- which(sam[-mpt, "Period2"]=="Pre")
+pos <- which(sam[-mpt, "Period2"]=="Post")
+```
+
+```{r, fig.height=5, fig.width=12}
+lapply(bd, FUN=function(x){
+  dis <- as.matrix(x$dis)
+  dis[pre, pre] <- NA # Set dissimilarities among pre-MPT samples to NA
+  dis[pos, pos] <- NA # Set dissimilarities among MPT samples to NA
+  ydis <- as.dist(dis)
+  
+  dis <- as.matrix(dist(sam[-mpt, "Age_ka"]))
+  xdis <- as.dist(dis)
+  
+  # Fit an exponential decay model
+  f <- decay.model(ydis,  xdis, y.type = "dissimilarities", perm = 999)
+  
+  # Extract coefficients
+  p <- round(f$p.value, 3)
+  r2 <- round(f$pseudo.r.squared, 3)
+  a <- round(f$first.parameter, 2) %>% as.vector
+  b <- round(f$second.parameter, 4) %>% as.vector
+  
+  # Exponential equation
+  eq <- bquote(y == .(a) ~ e^{.(b) * x}*"," ~ p==.(p))
+  
+  dat <- cbind(x = xdis  , y = ydis) %>% na.omit %>% as.data.frame
+  ggplot(data = dat, aes(x=x, y=y))+
+    geom_point()+
+    annotate("text", x=800, y=1, label=as.expression(eq) %>% as.character(), parse=T, colour="red")+
+    labs(x="Age difference (kyr)", y=x$lab[2], title=x$lab[1])+
+    ylim(0, 1)+
+    stat_smooth(method = "nls", formula = y ~ a * exp(b * x),
+              method.args = list(start = list(a = a, b = b)), 
+              se = FALSE, color = "red")+
+    theme_bw() %+replace% large
+}) %>% wrap_plots(axes = "collect")
+```
+
+Fig. X. Decomposition of pairwise Sørensen dissimilarities between pre-MPT and post-MPT. (a) Species turnover, (b) Nestedness, (c) total dissimilarity. The results indicate that the pairwise Sorensen dissimilarity between the Pre-MPT and MPT samples is dominated by species turnover; however, the species nestedness had considerable contributions. 
+
+## Pairwise dissimilarity among pre-MPT samples only
+
+```{r}
+# Any site pairs 
+pre <- which(sam$Period2=="Pre")
+mpt <- which(sam$Period2=="MPT")
+pos <- which(sam$Period2=="Post")
+
+# Partioning Sorensen dissimilarities
+be <- beta.pair(spp %>% decostand("pa"))
+
+bd <- list()
+bd$beta.sim$lab <- c(1, "Species turnover")
+bd$beta.sim$dis <- be$beta.sim
+bd$beta.sne$lab <- c(2, "Nestedness")
+bd$beta.sne$dis <- be$beta.sne
+bd$beta.sor$lab <- c(3, "Total dissimilarity")
+bd$beta.sor$dis <- be$beta.sor
+```
+
+```{r, fig.height=5, fig.width=12}
+p1 <- lapply(bd, FUN=function(x){
+  dis <- as.matrix(x$dis)[pre, pre]
+  ydis <- as.dist(dis)
+  
+  dis <- as.matrix(dist(sam$Age_ka))[pre, pre]
+  xdis <- as.dist(dis)
+  
+  # Fit an exponential decay model
+  f <- decay.model(ydis,  xdis, y.type = "dissimilarities", perm = 999)
+  
+  # Extract coefficients
+  p <- round(f$p.value, 3)
+  r2 <- round(f$pseudo.r.squared, 3)
+  a <- round(f$first.parameter, 2) %>% as.vector
+  b <- round(f$second.parameter, 4) %>% as.vector
+  
+  # Exponential equation
+  eq <- bquote(y == .(a) ~ e^{.(b) * x}*"," ~ p==.(p))
+  
+  dat <- cbind(x = xdis  , y = ydis) %>% na.omit %>% as.data.frame
+  dat$Period2 <- "Pre"
+  ggplot(data = dat, aes(x=x, y=y))+
+    geom_point()+
+    annotate("text", x=150, y=0.6, label=as.expression(eq) %>% as.character(), parse=T, colour="red")+
+    labs(x="", y=x$lab[2], title=paste("(", letters[1:3], ")", sep="")[as.numeric(x$lab[1])])+
+    ylim(0, 0.6)+
+    stat_smooth(method = "nls", formula = y ~ a * exp(b * x),
+              method.args = list(start = list(a = a, b = b)), 
+              se = FALSE, color = "red")+
+    facet_wrap(~Period2, scale = "free")+
+    theme_bw() %+replace% large
+}) %>% wrap_plots(axes = "collect")
+```
+
+Fig. X. Decomposition of pairwise Sørensen dissimilarities among the pre-MPT samples. (a) Species turnover, (b) Nestedness, (c) total dissimilarity. The results indicate that the pairwise Sorensen dissimilarity between the Pre-MPT samples is dominated by species turnover. 
+
+## Pairwise dissimilarity among MPT samples only
+
+```{r, fig.height=5, fig.width=12}
+p2 <- lapply(bd, FUN=function(x){
+  dis <- as.matrix(x$dis)[mpt, mpt]
+  ydis <- as.dist(dis)
+  
+  dis <- as.matrix(dist(sam$Age_ka))[mpt, mpt]
+  xdis <- as.dist(dis)
+  
+  # Fit an exponential decay model
+  f <- decay.model(ydis,  xdis, y.type = "dissimilarities", perm = 999)
+  
+  # Extract coefficients
+  p <- round(f$p.value, 3)
+  r2 <- round(f$pseudo.r.squared, 3)
+  a <- round(f$first.parameter, 2) %>% as.vector
+  b <- round(f$second.parameter, 4) %>% as.vector
+  
+  # Exponential equation
+  eq <- bquote(y == .(a) ~ e^{.(b) * x}*"," ~ p==.(p))
+  
+  dat <- cbind(x = xdis  , y = ydis) %>% na.omit %>% as.data.frame
+  dat$Period2 <- "MPT"
+  ggplot(data = dat, aes(x=x, y=y))+
+    geom_point()+
+    annotate("text", x=200, y=0.6, label=as.expression(eq) %>% as.character(), parse=T, colour="red")+
+    labs(x="", y=x$lab[2], title=paste("(", letters[4:6], ")", sep="")[as.numeric(x$lab[1])])+
+    ylim(0, 0.6)+
+    stat_smooth(method = "nls", formula = y ~ a * exp(b * x),
+              method.args = list(start = list(a = a, b = b)), 
+              se = FALSE, color = "red")+
+    facet_wrap(~Period2, scale = "free")+
+    theme_bw() %+replace% large
+}) %>% wrap_plots(axes = "collect")
+```
+
+Fig. X. Decomposition of pairwise Sørensen dissimilarities among the MPT samples. (a) Species turnover, (b) Nestedness, (c) total dissimilarity. The results indicate that the pairwise Sorensen dissimilarity among the MPT samples is dominated by species turnover. 
+
+## Pairwise dissimilarity among post-MPT samples only
+
+```{r, fig.height=5, fig.width=12}
+p3 <- lapply(bd, FUN=function(x){
+  dis <- as.matrix(x$dis)[pos, pos]
+  ydis <- as.dist(dis)
+  
+  dis <- as.matrix(dist(sam$Age_ka))[pos, pos]
+  xdis <- as.dist(dis)
+  
+  # Fit an exponential decay model
+  f <- decay.model(ydis,  xdis, y.type = "dissimilarities", perm = 999)
+  
+  # Extract coefficients
+  p <- round(f$p.value, 3)
+  r2 <- round(f$pseudo.r.squared, 3)
+  a <- round(f$first.parameter, 2) %>% as.vector
+  b <- round(f$second.parameter, 4) %>% as.vector
+  
+  # Exponential equation
+  eq <- bquote(y == .(a) ~ e^{.(b) * x}*"," ~ p==.(p))
+  
+  dat <- cbind(x = xdis  , y = ydis) %>% na.omit %>% as.data.frame
+  dat$Period2 <- "Post"
+  ggplot(data = dat, aes(x=x, y=y))+
+    geom_point()+
+    annotate("text", x=400, y=0.95, label=as.expression(eq) %>% as.character(), parse=T, colour="red")+
+    labs(x="Age difference (kyr)", y=x$lab[2], title=paste("(", letters[7:9], ")", sep="")[as.numeric(x$lab[1])])+
+    ylim(0, 1)+
+    stat_smooth(method = "nls", formula = y ~ a * exp(b * x),
+              method.args = list(start = list(a = a, b = b)), 
+              se = FALSE, color = "red")+
+    facet_wrap(~Period2, scale = "free")+
+    theme_bw() %+replace% large
+}) %>% wrap_plots(axes = "collect")
+```
+
+Fig. X. Decomposition of pairwise Sørensen dissimilarities among the Post-MPT samples. (a) Species turnover, (b) Nestedness, (c) total dissimilarity. The results indicate that the species turnover and nestedness contribute similarly to the pairwise Sorensen dissimilarity among the Post-MPT samples. 
+
+```{r,fig.height=15, fig.width=12}
+p1/p2/p3
+```
+
+Fig. X. Decomposition of pairwise Sørensen dissimilarities among the Pre-MPT (a-c), MPT (d-f), and Post-MPT samples (g-i). Panels show Species turnover (a, d, g) , Nestedness (b, e, h) , and total dissimilarity (c, f, i). The results indicate that the species turnover and nestedness contribute similarly to the pairwise Sorensen dissimilarity among the Post-MPT samples. 

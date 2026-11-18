@@ -1,0 +1,91 @@
+---
+title: "Okhotsk Diatom PCA"
+author: "Chih-Lin Wei"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###) 
+    toc_float: true
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 2000px !important;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+## import packages
+library(iNEXT.beta3D)
+library(readxl)
+library(tidyverse)
+library(plyr)
+library(ggrepel)
+library(doBy)
+library(patchwork)
+library(vegan)
+library(knitr)
+library(kableExtra)
+```
+
+# ggplot theme setting
+
+```{r}
+# plot setting
+large <- theme(legend.title = element_text(size=20),
+        legend.text = element_text(size=20),
+        axis.title = element_text(size=20),
+        axis.text = element_text(size=15),
+        strip.text = element_text(size=20))
+vert_x <- theme(axis.text.x.bottom = element_text(angle = 45, hjust = 1, face="italic"))
+no_strip.x <- theme(strip.background.x = element_blank(),
+                  strip.text.x = element_blank())
+no_strip.y <- theme(strip.background.y = element_blank(),
+                  strip.text.y = element_blank())
+no_legend <- theme(legend.position = "none")
+
+# Standard error function
+se <- function(x, ...)sd(x, ...)/sqrt(length(x))
+
+load(file="../Rdata/mis.rda") # Marine Isotope Stage
+load(file="../Rdata/spp.rda") # Raw species count
+load(file="../Rdata/sam.rda") # Sample information
+load(file="../Rdata/div.rda") # Diversity
+zero <- rowSums(spp)==0 # The sample with zero count
+cluster <- cut(sam$Age_ka, breaks = c(3.6, 200, 832, 1138, 1435, 1552), labels = c("D5", "D4", "D3", "D2", "D1"))
+sam <- cbind(sam[, 1:9], cluster, sam[, -1:-9])
+```
+
+# Principal Component Analysis (PCA) on diatom data
+
+Diatom abundance was subjected to Hellinger transformation before Principal Component Analysis (PCA). Principal Component Analysis (PCA) of the diatom assemblage (Fig. 3) reveals distinct spatiotemporal clustering across the designated zones (D1–D5), with the first two principal components accounting for 36.2% of the total variance (PC1: 20.0%, PC2: 16.2%). Samples from zone D1 (crosses) and zone D2 (circles) form a tight cluster in the upper-right quadrant along positive PC1 and PC2, driven by strong loadings on benthic and subpolar key taxa, specifically *Actinocyclus ochotensis* and *Coscinodiscus tabularis var. egregius*, along with *Shionodiscus oestrupii* and *Actinocyclus curvatulus*. Samples from zone D3 (squares) cluster primarily in the bottom-right quadrant along positive PC1 and negative PC2, characterized by *Rhizosolenia hebetata*. Samples from zones D4 (diamonds) and D5 (triangles) cluster primarily along negative PC1 scores, shifting toward the central and left quadrants. This negative PC1 domain is characterized by high abundances of coastal and subpolar taxon vectors, including *Shionodiscus trifultus*, *Chaetoceros spp.*, *Chaetoceros septentrionalis*, *Coscinodiscus marginatus*, and *Thalassiothrix longissima*. The positive PC2 axis captures a distinct compositional vector dominated by benthic and subpolar key taxa, specifically *Actinocyclus ochotensis* and *Coscinodiscus tabularis var. egregius*, along with *Shionodiscus oestrupii* and *Actinocyclus curvatulus*, extending into positive PC1 and positive PC2 space. The ordination demonstrates a major assemblage transition: older/distinct intervals (D1–D2) are dominated by diverse cold-water and coastal-mixed species on the positive PC1 side, whereas younger intervals (D4–D5) reflect a shift toward open-ocean and subpolar species on the negative PC1 side.
+
+```{r, fig.width=8, fig.height=6}
+pca <- decostand(spp[!zero,], method = "total") %>% sqrt %>% prcomp
+dat <- cbind(sam[!zero,], pca$x)
+lab <- data.frame(pca$rotation*1.5)
+lab$label <- sub(" ", "~~", paste("italic(", sub(" *\\(.*| *\\var. egregius.*", "", row.names(lab)), ")", sep="")) 
+
+lab <- lab[c("Rhizosolenia hebetata", "Paralia sulcata", "Thalassiosira jouseae", "Actinocyclus oculatus", "Shionodiscus trifultus", "Chaetoceros sp1", "Chaetoceros septentrionalis", "Coscinodiscus marginatus", "Thalassiothrix longissima", "Actinocyclus ochotensis", "Coscinodiscus tabularis var. egregius", "Shionodiscus oestrupii", "Actinocyclus curvatulus"), ]
+
+ggplot(dat)+
+    geom_point(aes(x=PC1, y=PC2, colour = cluster, shape = cluster), size = 3)+
+    stat_ellipse(aes(x=PC1, y=PC2, linetype = cluster, colour=cluster), type="norm")+
+    geom_segment(data=lab, aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("red", 0.5))+
+    geom_label_repel(data=lab, aes(x=PC1, y=PC2, label=label), colour="gray10", fill=alpha("white", 0.7), size=3, label.padding = unit(0.2, "lines"), parse = TRUE)+
+    scale_colour_viridis_d(direction = -1)+
+    scale_shape_manual(values = c(17, 18, 15, 19, 10))+
+    guides(linetype = guide_legend(order=1), colour = guide_legend(order=1), shape = guide_legend(order=1))+
+    labs(x="PC1 (20.0%)", y="PC2 (16.2%)", colour="Zone", shape = "Zone", linetype="Zone")+
+    theme_bw() %+replace% large 
+```
+
+Figure 3. Principal Component Analysis (PCA) biplot showing relationships between diatom species composition and sample distributions. The first two principal components (PC1 and PC2) explain the largest proportion of variance in the dataset (percent variance indicated on each axis). Individual symbols represent samples, grouped by depth intervals (D1–D5; see legend), illustrating changes in assemblage structure through time or stratigraphy. Red arrows indicate species loadings, with arrow length reflecting each taxon's relative contribution to the ordination and direction indicating the gradient along which species abundance increases. Species near the origin have weaker influence on the principal components, whereas those with longer vectors (e.g., *Rhizosolenia hebetata*, *Actinocyclus curvatulus*, *Actinocyclus ochotensis*, *Shionodiscus trifultus*) exert stronger control over assemblage variability.

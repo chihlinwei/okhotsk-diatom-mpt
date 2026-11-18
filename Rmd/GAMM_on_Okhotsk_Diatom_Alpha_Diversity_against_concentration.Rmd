@@ -1,0 +1,491 @@
+---
+title: "GAMM on alpha diversity"
+author: "Chih-Lin Wei"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###) 
+    toc_float: true
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 2000px !important;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+## import packages
+library(ggrepel)
+library(plyr)
+library(tidyverse)
+library(patchwork)
+library(doBy)
+library(reshape2)
+library(mgcv)
+library(knitr)
+library(kableExtra)
+library(MuMIn)
+library(caret)
+```
+
+# ggplot theme setting
+
+```{r}
+# plot setting
+large <- theme(legend.title = element_text(size=15),
+        legend.text = element_text(size=15),
+        axis.title = element_text(size=15),
+        axis.text = element_text(size=15),
+        strip.text = element_text(size=15))
+vert_x <- theme(axis.text.x.bottom = element_text(angle = 45, hjust = 1, face="italic"))
+no_strip.x <- theme(strip.background.x = element_blank(),
+                  strip.text.x = element_blank())
+no_strip.y <- theme(strip.background.y = element_blank(),
+                  strip.text.y = element_blank())
+no_legend <- theme(legend.position = "none")
+
+# Standard error function
+se <- function(x, ...)sd(x, ...)/sqrt(length(x))
+
+load(file="../Rdata/mis.rda") # Marine Isotope Stage
+load(file="../Rdata/spp.rda") # Raw species count
+load(file="../Rdata/sam.rda") # Sample information
+load(file="../Rdata/div.rda") # Diversity
+zero <- rowSums(spp)==0 # The sample with zero count
+```
+
+# Standardized Hill numbers at 90% sample coverage 
+
+The standardized Hill numbers were computed in the RMarkdown file **"Okhotsk_Diatom_Alpha_Diversity.Rmd."** In this section, we will load the saved data directly to analyze the diversity indices. The calculation includes species richness (0D), Shannon diversity (1D), and Simpson diversity (2D), all of which were standardized at a sample coverage of 90%. Additionally, we will assess species evenness by computing the normalized slope of the Hill number profile, which corresponds to the values for evenness (1E and 2E).
+
+# Generalized Additive Mixed-effect Model (GAMM) on species diversity
+
+Generalized additive mixed-effects modeling (GAMM) utilized penalized cubic regression splines with a modest set of evenly spaced knots across the covariate values. These splines are penalized using the conventional integrated square second-derivative cubic spline penalty [(Wood, 2017)](https://www.taylorfrancis.com/books/mono/10.1201/9781315370279/generalized-additive-models-simon-wood). The GAMM was fitted to a Gaussian (normal) distribution using a log link, and the smoothing parameter estimation was performed using the restricted maximum likelihood (REML) method. The GAMM employed six fixed factors as independent variables, including either interglacial or glacial period (Period), the different stages (Period2) of the Mid-Pleistocene Transition (MPT), sea surface temperature (SST), total organic carbon (TOC), total nitrogen (TN), total phosphate (TP), total inorganic carbon (TIC), and dinosterol (Dino). The fixed effects assess the average response of the dependent variables to these environmental factors. The analysis also incorporates a random factor, sediment age (Age_ka), to account for temporal autocorrelation. The random effects are incorporated through smooths as penalized regression terms that assess variability in average responses across different sampling time slices.
+
+```{r}
+dat <- melt(div, id.vars = c("Age_ka", "Period", "Period2", "SST", "TOC", "TN", "TP", "TIC", "Dino"), measure.vars = c("DAR", "d0", "d1", "d2", "e1","e2")) %>% group_split(variable) 
+names(dat) <- c("DAR", "d0", "d1", "d2", "e1","e2")
+dat[2:6] <- lapply(dat[2:6], FUN=function(x)x[!zero,])
+
+# GAM Formula
+gam_form <- formula(value ~ Period + Period2 + s(SST, bs = "cr", k=7) + s(TOC, bs = "cr", k=7) + s(TOC, bs = "cr", k=7) + s(TN, bs = "cr", k=7) + s(TP, bs = "cr", k=7) + s(TIC, bs = "cr", k=7) + s(Dino, bs = "cr", k=7) + s(Age_ka, bs = "re", k=7))
+
+gam_l <- lapply(dat, FUN=function(x){
+  gam(formula = gam_form, family = gaussian(link = "log"), data=x, method="REML", na.action = "na.fail")
+})
+```
+
+# Global model
+
+The results of the Generalized Additive Models (GAM) are summarized in three tables. The first table presents the parametric coefficients. The second table displays the approximate significance of the smooth terms in the GAMM. The third table shows the adjusted R-squared values, scale estimates of the GAMM, and sample size (n). 
+
+```{r}
+# Parametric coefficients
+lapply(gam_l, FUN = function(x) {
+  out <- summary(x)$p.table %>% as.data.frame
+  cbind(Term=row.names(out), out)
+  }) %>% ldply(.id = "Order.q") %>% kable(caption="Parametric coefficients") %>% kable_classic
+
+# Significance of smooth terms
+lapply(gam_l, FUN = function(x) {
+  out <- summary(x)$s.table %>% as.data.frame
+  cbind(Term=row.names(out), out)
+  }) %>% ldply(.id = "Order.q") %>% kable(caption="Significance of smooth terms") %>% kable_classic
+
+# Adjust R squares
+out <- lapply(gam_l, FUN=function(x)cbind(summary(x)$r.sq, summary(x)$scale, summary(x)$n)) %>% ldply(.id="Order.q")
+names(out)[2:4] <- c("R-sq.(adj)", "Scale est.", "n")
+kable(out, caption="Adjusted r-squared for the model") %>% kable_classic
+```
+
+```{r, eval=FALSE}
+# 10-fold Cross validation
+# The 9/10 of the data are used to re-fit the model and 1/10 of data to evaluate model performance (R2).
+# Repeat for 5 times
+perf_l <- lapply(dat, FUN=function(x){
+  cvs <- list()
+  for(i in 1:5){
+    repeat{
+      fold <- createFolds(1:dim(x)[1], k=10)
+      cv <- NULL
+      for(k in 1:10){
+        training_set <- x[-fold[[k]],]
+        validation_set <- x[fold[[k]],]
+        try(f <- gam(formula = gam_form, family = gaussian(link = "log"), data=training_set, method="REML", na.action = "na.fail"))
+        pred <- predict(f, newdata=validation_set, type="response")
+        cv <- rbind(cv, cbind(pred, obs = validation_set$value) %>% as.data.frame)
+        }
+      if(!is(f, "try-error"))
+        break
+      }
+    cvs[[i]] <- defaultSummary(cv)
+    }
+  m <- ldply(cvs) %>% colMeans
+  s <- apply(ldply(cvs), 2, FUN=sd)
+  names(s) <- paste(names(s), "SD", sep="")
+  c(m, s)
+  })
+
+save(perf_l, file="../Rdata/cross_v_r2_all.rda")
+
+
+```
+
+```{r}
+load("../Rdata/cross_v_r2_all.rda")
+kable(perf_l %>% ldply(.id = "Order.q"), caption="Accuracy and performance of the model by 10-fold cross validation, repeated 5 times") %>% kable_classic
+```
+
+
+## Model validation for normality and homogeneity
+
+The model assumptions of GAMM were validated by visual inspection of residual, observation, and prediction distributions. We used the normal Q-Q Plot to compare the quantiles of the residuals against the quantiles of a standard normal distribution. A straight line indicates that the residuals are approximately normally distributed. The residual histogram provides a visual representation of the distribution of the residuals, illustrating the frequency of residual values. Any skewness or kurtosis would indicate deviations of residuals from normality. We also examine the assumption of homogeneity by checking whether the residuals are spread evenly around zero across all levels of the predictor variables and whether their variance remains consistent across different groups or transects. A random scatter of points around zero suggests homogeneity, while any discernible pattern may indicate a problem with the model, such as non-constant variance (heteroscedasticity).
+
+* **Model Assumption on Normal Distribution**: These analyses evaluate whether the residuals (the differences between the observed and predicted values) of the model are normally distributed.
+  * **Normal Q-Q Plot** compares the quantiles of the residuals with the quantiles of a standard normal distribution. A straight line in this plot indicates that the residuals are approximately normally distributed.
+  * **Histogram of Residuals** provides a visual representation of the distribution of the residuals. It helps illustrate the frequency of residual values, suggesting any skewness or kurtosis that may indicate deviations from normality.
+
+* **Model Assumption on Homogeneity**: These analyses check whether the residuals are spread evenly around zero across all levels of the predictor variables and whether their variance remains consistent across different groups or transects.
+  * **Residuals vs. Fitted Values Plot** illustrates the relationship between the predicted values (fitted values) from the model and the residuals. A random scatter of points around zero suggests homogeneity, while any discernible pattern may indicate a problem with the model, such as non-constant variance (heteroscedasticity).
+
+* **Model Fit**: These analyses assess the overall performance and accuracy of the model in predicting the response variable.
+  * **Response vs. Fitted Values Plot** compares the actual observed values of the response variable against the values predicted by the model. A tighter cluster of points along a 45-degree line indicates a better fit, reflecting high predictive accuracy and minimal error.
+
+```{r, fig.width=16, fig.height=12}
+gam_l$DAR$title <- "DAR"
+gam_l$d0$title <- expression(""^0*italic(D))
+gam_l$d1$title <- expression(""^1*italic(D))
+gam_l$d2$title <- expression(""^2*italic(D))
+gam_l$e1$title <- expression(""^1*italic(E))
+gam_l$e2$title <- expression(""^2*italic(E))
+
+lapply(gam_l, FUN=function(x){
+  p1<- ggplot() + 
+    stat_qq(aes(sample = residuals(x))) +
+    labs(x = "Theoretical Quantiles", y = "Deviance Residuals", title = parse(text=x$title))+
+    theme_bw() %+replace% large
+  p2 <- ggplot(data=cbind(p=predict(x), r=residuals(x))) + 
+    geom_point(aes(x=p, y=log(r)), shape = 1) +
+    labs(x = "Fitted Values", y = "Residuals")+
+    theme_bw() %+replace% large
+  p3 <- ggplot() + 
+    geom_histogram(aes(residuals(x)), colour="black") +
+    labs(x = "Residuals", y = "Frequency")+
+    theme_bw() %+replace% large
+  p4 <- ggplot() + 
+    geom_point(aes(x= predict(x), y = log(x$y)), shape = 1) +
+    labs(x = "Fitted Values", y = "Response")+
+    theme_bw() %+replace% large
+  p1+p2+p3+p4
+}) %>% wrap_plots
+```
+
+Fig. x. Model diagnostics for Generalized Additive Model (GAM). QQ plot and residual histogram show that the model residuals are reasonably normally distributed. The residuals are evenly spread (homogeneous) around zero. The model fits are good, as indicated by adjusted R-squared.
+
+## Soomth compnents of the fitted GAM
+
+The following graphs display the smooth components of a fitted Generalized Additive Model (GAM). Overall, the models predict that species diversity decreases with increasing distance from land and with the export of particulate organic carbon (POC). Initially, diversity increases with light availability; however, it declines at the highest light levels. Although species diversity appears to increase with bottom temperature, only the Simpson diversity (2D) is significantly affected by temperature. 
+
+```{r, fig.keep="none"}
+gam_pred <- lapply(gam_l, FUN=function(x){
+  out <- plot(x, residuals = TRUE, page=1)
+  names(out) <- names(x$model)[names(x$model) %in% c("Age_ka", "SST", "TOC", "TN", "TP", "TIC", "Dino")]
+  lapply(out[!names(out)=="Age_ka"], FUN = function(x){
+    out <- cbind(x$x, x$fit, x$se, x$raw, x$p.resid) %>% as.data.frame
+    names(out) <- c("x", "fit", "se", "rug", "p.resid")
+    return(out)
+  }) %>% ldply(.id = "env")
+}) %>% ldply(.id = "var")
+
+gam_pred$label <- factor(gam_pred$var, 
+                             labels = c("DAR", expression(""^0*italic(D)), expression(""^1*italic(D)), 
+                                        expression(""^2*italic(D)), expression(""^1*italic(E)), 
+                                        expression(""^2*italic(E))
+                                        ))
+```
+
+```{r, fig.width=16, fig.height=12}
+library(stringr)
+
+pv <- lapply(gam_l, FUN = function(x) {
+  out <- summary(x)$s.table %>% as.data.frame
+  cbind(Term=row.names(out), out)
+  }) %>% ldply(.id = "var") 
+
+pv$env <- gsub(".*\\((.*)\\).*", "\\1", pv$Term)
+
+keep <- match(with(gam_pred, paste(var, env)), with(pv, paste(var, env)))
+gam_pred$pvalue <- pv$`p-value`[keep]
+
+lapply(subset(gam_pred, pvalue<0.05) %>% group_split(var, env), FUN=function(x){
+  ggplot(data=x)+
+    geom_ribbon(aes(x=x, ymin=fit-se*1.9, ymax=fit+se*1.9, fill=pvalue))+
+    #geom_point(aes(x=x, y=fit+p.resid), colour = "gray60")+
+    geom_line(aes(x=x, y=fit))+
+    geom_line(aes(x=x, y=fit-se*1.9), linetype=2)+
+    geom_line(aes(x=x, y=fit+se*1.9), linetype=2)+
+    geom_rug(aes(x=rug), sides="b")+
+    scale_fill_gradient(low = "#4292c6", high = "#deebf7", breaks = c(0.001, 0.025, 0.05), limits = c(0, 0.05), na.value = "white")+
+    labs(x=x$env[1], y = parse(text=as.character(x$label[1])), fill = "p-value")+
+    theme_bw() %+replace% large
+}) %>% wrap_plots() +
+  plot_layout(guides = "collect") & theme(legend.position = "right")
+
+```
+
+Fig. X. Soomth compnents of the global generalized additive model (GAM) fitted to diatom accumulation rate (DAR), species richness (0D), Shannon diversity (1D), Simpson diversity (2D), and species evenness (1E & 2E). The solid and dashed line show the smooth component and 95% confidence intervals of GAM. The color shades of the 95% confidence intervals indicate significance of the smoothers. The gray symbols show that GAM fits plus partial residuals. The rugs show the distribution of environmental values. 
+
+# Model selction
+
+Model selection was developed by repeatedly evaluating a subset of candidate models from a global model, including all potential predictor variables. The comparison and ranking of these models are based on AICc, which is an adjustment of the standard Akaike Information Criterion (AIC) that incorporates a correction for small sample sizes relative to the number of model parameters. Models with lower AICc values are considered to provide a better fit to the data for a given number of parameters, indicating a better balance between model complexity and goodness of fit [(Anderson and Burnham, 2002)](https://doi.org/10.2307/3803155).
+The model with the lowest AICc is considered the “best” model in the candidate set. We used delta AICc (ΔAICc) to examine the difference between the AICc of each model and the AICc of the best-ranked model. Then, the Akaike Weights (weight) are derived from the ΔAICc values to measure the relative likelihood of each model being the best model. Akaike weights sum to one across all considered models. A model with a higher weight is more likely to be the best approximating model.
+
+## Model comparisons based on AICc
+
+```{r, eval=FALSE}
+f1 <- gam(formula = value ~ Period + Period2 + s(SST, bs = "cr", k=7) + s(TOC, bs = "cr", k=7) + s(TN, bs = "cr", k=7) + s(TP, bs = "cr", k=7) + s(TIC, bs = "cr", k=7) + s(Dino, bs = "cr", k=7) + s(Age_ka, bs = "re", k=7), family = gaussian(link = "log"), data=dat$DAR, method="REML", na.action = "na.fail")
+
+f2 <- gam(formula = value ~ Period + Period2 + s(SST, bs = "cr", k=7) + s(TOC, bs = "cr", k=7) + s(TN, bs = "cr", k=7) + s(TP, bs = "cr", k=7) + s(TIC, bs = "cr", k=7) + s(Dino, bs = "cr", k=7) + s(Age_ka, bs = "re", k=7), family = gaussian(link = "log"), data=dat$d0, method="REML", na.action = "na.fail")
+
+f3 <- gam(formula = value ~ Period + Period2 + s(SST, bs = "cr", k=7) + s(TOC, bs = "cr", k=7) + s(TN, bs = "cr", k=7) + s(TP, bs = "cr", k=7) + s(TIC, bs = "cr", k=7) + s(Dino, bs = "cr", k=7) + s(Age_ka, bs = "re", k=7), family = gaussian(link = "log"), data=dat$d1, method="REML", na.action = "na.fail")
+
+f4 <- gam(formula = value ~ Period + Period2 + s(SST, bs = "cr", k=7) + s(TOC, bs = "cr", k=7) + s(TN, bs = "cr", k=7) + s(TP, bs = "cr", k=7) + s(TIC, bs = "cr", k=7) + s(Dino, bs = "cr", k=7) + s(Age_ka, bs = "re", k=7), family = gaussian(link = "log"), data=dat$d2, method="REML", na.action = "na.fail")
+
+f5 <- gam(formula = value ~ Period + Period2 + s(SST, bs = "cr", k=7) + s(TOC, bs = "cr", k=7) + s(TN, bs = "cr", k=7) + s(TP, bs = "cr", k=7) + s(TIC, bs = "cr", k=7) + s(Dino, bs = "cr", k=7) + s(Age_ka, bs = "re", k=7), family = gaussian(link = "log"), data=dat$e1, method="REML", na.action = "na.fail")
+
+f6 <- gam(formula = value ~ Period + Period2 + s(SST, bs = "cr", k=7) + s(TOC, bs = "cr", k=7) + s(TN, bs = "cr", k=7) + s(TP, bs = "cr", k=7) + s(TIC, bs = "cr", k=7) + s(Dino, bs = "cr", k=7), family = gaussian(link = "log"), data=dat$e2, method="REML", na.action = "na.fail")
+
+f <- list(f1, f2, f3, f4, f5, f6)
+names(f) <- c("DAR", "d0", "d1", "d2", "e1","e2")
+
+ms1 <- dredge(f1, extra = c("R^2", "adjR^2"))
+ms2 <- dredge(f2, extra = c("R^2", "adjR^2"))
+ms3 <- dredge(f3, extra = c("R^2", "adjR^2"))
+ms4 <- dredge(f4, extra = c("R^2", "adjR^2"))
+ms5 <- dredge(f5, extra = c("R^2", "adjR^2"))
+ms6 <- dredge(f6, extra = c("R^2", "adjR^2"))
+ms <- list(ms1, ms2, ms3, ms4, ms5, ms6)
+names(ms) <- c("DAR", "d0", "d1", "d2", "e1","e2")
+
+save(ms, file="../Rdata/ms_concentration.rda")
+```
+
+```{r}
+load("../Rdata/ms_concentration.rda")
+lapply(ms, FUN=function(x)(x[1:10,])) %>% ldply(.id="Order.q") %>% kable(caption = "Model coefficients and ranking statistics. Each row represents one model.") %>% kable_classic
+```
+
+## Model averaging and variable importance
+
+We averaged the parameter estimates across all candidate models, with each estimate weighted by its Akaike weight. These weights indicate the relative support for each candidate model [(Anderson et al., 2000)](https://doi.org/10.2307/3803199). The model averaging accounted for uncertainty in model selection and provided appropriate confidence intervals.
+The relative importance of a predictor variable is then determined by summing the Akaike weights of all the models in the candidate set that include that specific predictor variable [(Burnham and Anderson, 2002)](https://doi.org/10.2307/3803155). For instance, if a predictor variable appears in many of the “good” models (i.e., models with high Akaike weights), its relative importance will be high, suggesting that the variable is a strong predictor of the response variable, as it consistently contributes to well-fitting models. Conversely, if a predictor variable only appears in models with low Akaike weights, its relative importance will be low, indicating that it is less important for explaining the variation in the response.
+
+```{r, eval=FALSE}
+ma <- lapply(ms, FUN=function(x) model.avg(x, rank="AICc", fit=TRUE))
+save(ma, file="../Rdata/ma_concentration.rda")
+```
+
+```{r}
+load("../Rdata/ma_concentration.rda")
+
+#lapply(ma, FUN=function(x){
+#  d <- summary(x)$msTable %>% as.data.frame
+#  cbind(Term.code=row.names(d), d)
+#  }) %>% ldply(.id="Order.q") %>%kable(caption = "Log-likelihood, AICc, ΔAICc and ‘Akaike weights’ for the component models") %>%kable_classic
+
+#lapply(ma, FUN=function(x){
+#  d <- summary(x)$coefmat.full %>% as.data.frame
+#  cbind(Term=row.names(d), d)
+#  }) %>% ldply(.id="Order.q") %>%kable(caption = "Full model-averaged coefficients. The ‘full’ average assumes that all variable are included in every model, but in some models the corresponding coefficient is set to zero during model selection.") %>%kable_classic
+
+
+nam <- c("Period", "Period2", "s(SST, bs = \"cr\", k = 7)", "s(TOC, bs = \"cr\", k = 7)", "s(TN, bs = \"cr\", k = 7)", "s(TP, bs = \"cr\", k = 7)", "s(TIC, bs = \"cr\", k = 7)", "s(Dino, bs = \"cr\", k = 7)", "s(Age_ka, bs = \"re\", k = 7)")
+
+imp <- lapply(ma, FUN=function(x)summary(x)$sw[nam])%>%ldply(.id="Variable")
+names(imp) <- c("Variable", "Period", "Period2", "SST", "TOC", "TN", "TP", "TIC", "Dino", "Age_ka")
+imp %>% kable(caption = "Per-model term sum of model Akaike weights over all of the models")%>%kable_classic
+```
+
+```{r}
+pca <- scale(imp[, c("SST", "TOC", "TN", "TP", "TIC", "Dino")]) %>% prcomp
+out <- as.data.frame(pca$x)
+out$label <- c("DAR", "\"\"^0 * italic(D)", "\"\"^1 * italic(D)", "\"\"^2 * italic(D)", "\"\"^1 * italic(E)", "\"\"^2 * italic(E)")
+lab <- data.frame(pca$rotation*4)
+lab$label <- row.names(lab)
+# Variance explained by PC axes
+a1 <- round(summary(pca)$importance[2,1]*100, 1)
+a2 <- round(summary(pca)$importance[2,2]*100, 1)
+
+ggplot()+
+    geom_label_repel(data=out, aes(x=PC1, y=PC2, label=label), parse=TRUE, size=5)+
+    geom_segment(data=lab, aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("red", 0.5))+
+    geom_label_repel(data=lab, aes(x=PC1, y=PC2, label=label), colour="red", fill="transparent", size=5, label.padding = unit(0.2, "lines"))+
+    labs(x=paste("PCA1 (", a1, " %)", sep=""), y=paste("PCA2 (", a2, " %)", sep=""))+  
+    theme_bw() %+replace% large
+```
+
+
+## Summary of the top model
+
+The best models align closely with the global models, which identify only the distance to land, export particulate organic carbon (POC), and light availability at the seafloor as significant factors in modeling species richness (0D), Shannon diversity (1D), and Simpson diversity (2D). The variance explained by these top models ranges from 35% to 48%, indicating good model performance for ecological analysis. Subsequent analyses, including model diagnostics and predictions, will be based on the top-performing model.
+
+```{r}
+gam_t <- lapply(ms, FUN=function(x)get.models(x, subset=1)[[1]])
+
+# Parametric coefficients
+lapply(gam_t, FUN = function(x) {
+  out <- summary(x)$p.table %>% as.data.frame
+  cbind(Term=row.names(out), out)
+  }) %>% ldply(.id = "Order.q") %>% kable(caption="Parametric coefficients") %>% kable_classic
+
+# Significance of smooth terms
+lapply(gam_t, FUN = function(x) {
+  out <- summary(x)$s.table %>% as.data.frame
+  cbind(Term=row.names(out), out)
+  }) %>% ldply(.id = "Order.q") %>% kable(caption="Significance of smooth terms") %>% kable_classic
+
+# Adjust R squares
+out <- lapply(gam_t, FUN=function(x)cbind(summary(x)$r.sq, summary(x)$scale, summary(x)$n)) %>% ldply(.id="Order.q")
+names(out)[2:4] <- c("R-sq.(adj)", "Scale est.", "n")
+kable(out, caption="Adjusted r-squared for the model") %>% kable_classic
+```
+
+```{r, eval=FALSE}
+# 10-fold Cross validation
+# The 9/10 of the data are used to re-fit the model and 1/10 of data to evaluate model performance (R2).
+# Repeat for 5 times
+perf_t <- lapply(dat, FUN=function(x){
+  cvs <- list()
+  for(i in 1:5){
+    repeat{
+      fold <- createFolds(1:dim(x)[1], k=10)
+      cv <- NULL
+      for(k in 1:10){
+        training_set <- x[-fold[[k]],]
+        validation_set <- x[fold[[k]],]
+        try(f <- gam(formula = gam_t[[x$variable[1]]] %>% formula, family = gaussian(link = "log"), data=training_set, method="REML", na.action = "na.fail"))
+        pred <- predict(f, newdata=validation_set, type="response")
+        cv <- rbind(cv, cbind(pred, obs = validation_set$value) %>% as.data.frame)
+        }
+      if(!is(f, "try-error"))
+        break
+      }
+    cvs[[i]] <- defaultSummary(cv)
+    }
+  m <- ldply(cvs) %>% colMeans
+  s <- apply(ldply(cvs), 2, FUN=sd)
+  names(s) <- paste(names(s), "SD", sep="")
+  c(m, s)
+  })
+save(perf_t, file="../Rdata/cross_v_r2_top.rda")
+```
+
+```{r}
+load("../Rdata/cross_v_r2_top.rda")
+kable(perf_t %>% ldply(.id = "Order.q"), caption="Accuracy and performance of the model by 10-fold cross validation, repeated 5 times") %>% kable_classic
+```
+
+
+## Model validation for normality and homogeneity
+
+* **Model Assumption on Normal Distribution**: These analyses evaluate whether the residuals (the differences between the observed and predicted values) of the model are normally distributed.
+  * **Normal Q-Q Plot** compares the quantiles of the residuals with the quantiles of a standard normal distribution. A straight line in this plot indicates that the residuals are approximately normally distributed.
+  * **Histogram of Residuals** provides a visual representation of the distribution of the residuals. It helps illustrate the frequency of residual values, suggesting any skewness or kurtosis that may indicate deviations from normality.
+
+* **Model Assumption on Homogeneity**: These analyses check whether the residuals are spread evenly around zero across all levels of the predictor variables and whether their variance remains consistent across different groups or transects.
+  * **Residuals vs. Fitted Values Plot** illustrates the relationship between the predicted values (fitted values) from the model and the residuals. A random scatter of points around zero suggests homogeneity, while any discernible pattern may indicate a problem with the model, such as non-constant variance (heteroscedasticity).
+
+* **Model Fit**: These analyses assess the overall performance and accuracy of the model in predicting the response variable.
+  * **Response vs. Fitted Values Plot** compares the actual observed values of the response variable against the values predicted by the model. A tighter cluster of points along a 45-degree line indicates a better fit, reflecting high predictive accuracy and minimal error.
+
+```{r, fig.width=16, fig.height=12}
+gam_t$DAR$title <- "DAR"
+gam_t$d0$title <- expression(""^0*italic(D))
+gam_t$d1$title <- expression(""^1*italic(D))
+gam_t$d2$title <- expression(""^2*italic(D))
+gam_t$e1$title <- expression(""^1*italic(E))
+gam_t$e2$title <- expression(""^2*italic(E))
+
+lapply(gam_t, FUN=function(x){
+  p1<- ggplot() + 
+    stat_qq(aes(sample = residuals(x))) +
+    labs(x = "Theoretical Quantiles", y = "Deviance Residuals", title = parse(text=x$title))+
+    theme_bw() %+replace% large
+  p2 <- ggplot(data=cbind(p=predict(x), r=residuals(x))) + 
+    geom_point(aes(x=p, y=log(r)), shape = 1) +
+    labs(x = "Fitted Values", y = "Residuals")+
+    theme_bw() %+replace% large
+  p3 <- ggplot() + 
+    geom_histogram(aes(residuals(x)), colour="black") +
+    labs(x = "Residuals", y = "Frequency")+
+    theme_bw() %+replace% large
+  p4 <- ggplot() + 
+    geom_point(aes(x= predict(x), y = log(x$y)), shape = 1) +
+    labs(x = "Fitted Values", y = "Response")+
+    theme_bw() %+replace% large
+  p1+p2+p3+p4
+}) %>% wrap_plots
+```
+
+Fig. x. Model diagnostics for Generalized Additive Model (GAM). QQ plot and residual histogram show that the model residuals are reasonably normally distributed. The residuals are evenly spread (homogeneous) around zero. The model fits are good, as indicated by adjusted R-squared.
+
+## Soomth compnents of the fitted GAM
+
+The following graphs display the smooth components of a fitted Generalized Additive Model (GAM). Overall, the models predict that species diversity decreases with increasing distance from land and with the export of particulate organic carbon (POC). Initially, diversity increases with light availability; however, it declines at the highest light levels. Although species diversity appears to increase with bottom temperature, only the Simpson diversity (2D) is significantly affected by temperature. 
+
+```{r, fig.keep="none"}
+gam_pred <- lapply(gam_t, FUN=function(x){
+  out <- plot(x, residuals = TRUE, page=1)
+  names(out) <- names(x$model)[names(x$model) %in% c("Age_ka", "SST", "TOC", "TN", "TP", "TIC", "Dino")]
+  lapply(out[!names(out)=="Age_ka"], FUN = function(x){
+    out <- cbind(x$x, x$fit, x$se, x$raw, x$p.resid) %>% as.data.frame
+    names(out) <- c("x", "fit", "se", "rug", "p.resid")
+    return(out)
+  }) %>% ldply(.id = "env")
+}) %>% ldply(.id = "var")
+
+gam_pred$label <- factor(gam_pred$var, 
+                             labels = c("DAR", expression(""^0*italic(D)), expression(""^1*italic(D)), 
+                                        expression(""^2*italic(D)), expression(""^1*italic(E)), 
+                                        expression(""^2*italic(E))
+                                        ))
+```
+
+```{r, fig.width=16, fig.height=12}
+library(stringr)
+
+pv <- lapply(gam_t, FUN = function(x) {
+  out <- summary(x)$s.table %>% as.data.frame
+  cbind(Term=row.names(out), out)
+  }) %>% ldply(.id = "var") 
+
+pv$env <- gsub(".*\\((.*)\\).*", "\\1", pv$Term)
+
+keep <- match(with(gam_pred, paste(var, env)), with(pv, paste(var, env)))
+gam_pred$pvalue <- pv$`p-value`[keep]
+
+lapply(subset(gam_pred, pvalue<0.05) %>% group_split(var, env), FUN=function(x){
+  ggplot(data=x)+
+    geom_ribbon(aes(x=x, ymin=fit-se*1.9, ymax=fit+se*1.9, fill=pvalue))+
+    #geom_point(aes(x=x, y=fit+p.resid), colour = "gray60")+
+    geom_line(aes(x=x, y=fit))+
+    geom_line(aes(x=x, y=fit-se*1.9), linetype=2)+
+    geom_line(aes(x=x, y=fit+se*1.9), linetype=2)+
+    geom_rug(aes(x=rug), sides="b")+
+    scale_fill_gradient(low = "#4292c6", high = "#deebf7", breaks = c(0.001, 0.025, 0.05), limits = c(0, 0.05), na.value = "white")+
+    labs(x=x$env[1], y = parse(text=as.character(x$label[1])), fill = "p-value")+
+    theme_bw() %+replace% large
+}) %>% wrap_plots() +
+  plot_layout(guides = "collect") & theme(legend.position = "right")
+```
+
+Fig. X. Soomth compnents of the top generalized additive model (GAM) fitted to diatom accumulation rate (DAR), species richness (0D), Shannon diversity (1D), Simpson diversity (2D), and species evenness (1E & 2E). The solid and dashed line show the smooth component and 95% confidence intervals of GAM. The color shades of the 95% confidence intervals indicate significance of the smoothers. The gray symbols show that GAM fits plus partial residuals. The rugs show the distribution of environmental values. 

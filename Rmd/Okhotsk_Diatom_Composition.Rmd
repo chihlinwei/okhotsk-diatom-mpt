@@ -1,0 +1,468 @@
+---
+title: "Okhotsk Diatom Composition"
+author: "Chih-Lin Wei"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###) 
+    toc_float: true
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 2000px !important;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+## import packages
+library(iNEXT.beta3D)
+library(readxl)
+library(tidyverse)
+library(plyr)
+library(ggrepel)
+library(doBy)
+library(patchwork)
+library(vegan)
+library(knitr)
+library(kableExtra)
+```
+
+# ggplot theme setting
+
+```{r}
+# plot setting
+large <- theme(legend.title = element_text(size=15),
+        legend.text = element_text(size=15),
+        axis.title = element_text(size=15),
+        axis.text = element_text(size=15),
+        strip.text = element_text(size=15))
+large2 <- theme(legend.title = element_text(size=20),
+        legend.text = element_text(size=20),
+        axis.title = element_text(size=20),
+        axis.text = element_text(size=15),
+        strip.text = element_text(size=20))
+vert_x <- theme(axis.text.x.bottom = element_text(angle = 45, hjust = 1, face="italic"))
+no_strip.x <- theme(strip.background.x = element_blank(),
+                  strip.text.x = element_blank())
+no_strip.y <- theme(strip.background.y = element_blank(),
+                  strip.text.y = element_blank())
+no_legend <- theme(legend.position = "none")
+
+# Standard error function
+se <- function(x, ...)sd(x, ...)/sqrt(length(x))
+
+load(file="../Rdata/mis.rda") # Marine Isotope Stage
+load(file="../Rdata/spp.rda") # Raw species count
+load(file="../Rdata/sam.rda") # Sample information
+load(file="../Rdata/div.rda") # Diversity
+zero <- rowSums(spp)==0 # The sample with zero count
+```
+
+# Principal Component Analysis (PCA) on environmental data
+
+```{r, fig.width=10, fig.height=8}
+pca <- scale(sam[,c("SST", "TOC", "TN", "TP", "TIC", "Dino")]) %>% prcomp
+dat <- cbind(sam, pca$x)
+lab <- data.frame(pca$rotation*4)
+lab$label <- row.names(lab)
+
+p1 <- ggplot(dat)+
+    geom_point(aes(x=PC1, y=PC2, fill=Period2, shape = Period2), size = 3)+
+    stat_ellipse(aes(x=PC1, y=PC2, linetype = Period2, colour=Period2), type="norm")+
+    geom_segment(data=lab, aes(x=0, y=0, xend=PC1, yend=PC2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("red", 0.5))+
+    geom_label_repel(data=lab, aes(x=PC1, y=PC2, label=label), colour="gray10", fill=alpha("white", 0.7), size=5, label.padding = unit(0.2, "lines"))+
+    ylim(-3.5, 3.5)+
+    scale_fill_viridis_d(direction = -1)+
+    scale_colour_viridis_d(direction = -1)+
+    scale_shape_manual(values = c(21, 22, 25))+
+    guides(fill = guide_legend(order=1), linetype = guide_legend(order=1), colour = guide_legend(order=1))+
+    labs(x="PC1 (35.9%)", y="PC2 (19.1%)", fill="Period", colour="Period", shape = "Period", linetype="Period", title = "(a)")+  
+    theme_bw() %+replace% large2 %+replace% theme(legend.position = "none")
+
+p2 <- ggplot(data = sam %>% pivot_longer(cols=c("SST", "TOC", "TN", "TP", "TIC", "Dino")), aes(x = Period2, y=value, fill=Period2))+
+  geom_violin(position = "dodge")+
+  facet_wrap(~name, scale="free_y", ncol=2)+
+  scale_y_log10()+
+  scale_fill_viridis_d(direction = -1)+
+  labs(x="", y="Environmental values", title = "(b)")+
+  theme_bw() %+replace% large2 %+replace% theme(legend.position = "none") %+replace% vert_x
+
+ggplot(data = sam %>% pivot_longer(cols=c("SST", "TOC", "TN", "TP", "TIC", "Dino")), aes(x = Period, y=value, fill=Period))+
+  geom_violin(position = "dodge")+
+  facet_wrap(~name, scale="free", ncol=3)+
+  scale_y_log10()+
+  scale_fill_viridis_d(direction = -1)+
+  labs(x="", y="Environmental values")+
+  theme_bw() %+replace% large %+replace% theme(legend.position = "none") %+replace% vert_x
+```
+
+```{r, fig.width=12, fig.height=8}
+p1+p2+plot_layout(widths = c(2, 1), axes = "collect")
+```
+
+
+# iNterpolation and EXTrapolation with beta diversity based on Hill numbers
+
+## Estimate coverage-based pairwise gamma, alpha, beta diversities and dissimilarities
+
+The object Dists contains pairwise diversity/dissimilarity matrices for each of $q = 0, 1$, and $2$. Diversity metrics are standardized as follows: gamma diversity represents the effective number of species in the entire assemblage; alpha diversity reflects the mean joint diversity or the effective number of species-assemblage combinations per actual assemblage; and beta diversity quantifies the effective number of assemblages based on (unweighted) species raw abundance datasets, ranging from 1 to N, where $beta = 1$ indicates identical species raw abundance datasets across assemblages, and $beta = N$ indicates no shared species among assemblages.  
+
+Additional standardized dissimilarity and turnover indices include $1-C$, the standardized Sørensen-type non-overlap index, which measures the average proportion of non-shared species in an assemblage and corresponds to Sørensen, Horn, and Morisita-Horn dissimilarities for $q = 0, 1$, and $2$ , respectively. $1-U$, the standardized Jaccard-type non-overlap index, represents the proportion of non-shared species in the pooled assemblage. $1-V$, the standardized Sørensen-type turnover index, captures species turnover relative to alpha diversity, while $1-S$, the standardized Jaccard-type turnover index, measures species turnover relative to gamma diversity.  For more details, see [Chao et al. (2023)](https://doi.org/10.1002/ecm.1588), [Chao et al. (2019)](https://doi.org/10.1111/2041-210X.13233), [Chiu et al. (2014)](https://doi.org/10.1890/12-0960.1), and [Chao et al. (2016)](https://link.springer.com/chapter/10.1007/978-3-319-22461-9_8).
+
+```{r}
+# Generate list of all sample combination pairs 
+# species abundance matrix with sample as columns and species as rows
+sp <- t(spp[!zero,])
+N=ncol(sp) # number of sample
+p <- combn(N, 2)
+dl <- NULL
+for(i in 1:dim(p)[2]) dl[[i]] <- sp[, p[,i]]
+# Empty matrix to fill the pariwise dissimilarity later
+m <- matrix(0, ncol=N, nrow=N) %>% as.data.frame
+row.names(m) <- colnames(sp)
+names(m) <- colnames(sp)
+```
+
+```{r, eval=FALSE}
+library(foreach)
+library(doSNOW) 
+
+# Function for iNterpolation and EXTrapolation of gamma, beta, alpha, 1-C, 1-U, 1-V, 1-S based on Hill number 
+iNEXT.beta3D_fun <- function(x, ...){
+  iNEXTbeta3D(x, q = c(0, 1, 2), ...) %>% lapply(FUN = function(x) lapply(x, FUN = function(x) x[5]))
+}  
+
+# We set the sample coverage = 0.7, which is the same as the alpha diversity analysis
+cl<-makeCluster(16) # change the 16 to your number of CPU cores
+registerDoSNOW(cl) # register the SNOW parallel backend with the foreach package
+est <- foreach(i=1:length(dl), .packages=c("iNEXT.beta3D", "dplyr")) %dopar% iNEXT.beta3D_fun(dl[[i]], level=0.9, nboot=100)
+stopCluster(cl) # stop a SNOW cluster
+
+save(est, file="../Rdata/Dists.rda")
+```
+
+# Sorensen-type non-overlap dissimilarity (1-C) 
+* q = 0 for Sørensen dissimilarity
+* q = 1 for Horn dissimilarity
+* q = 2 for Morisita-Horn dissimilarity
+* Dissimilarities are standardized by 70% sample coverage (same as alpha diversity analysis)
+
+```{r}
+load("../Rdata/Dists.rda")
+# Extract 1-C dissimilarity for q = 0, 1, 2
+q0 <- lapply(est, FUN=function(x)x[[1]][["1-C"]][[1]][[1]]) %>% unlist
+q1 <- lapply(est, FUN=function(x)x[[1]][["1-C"]][[1]][[2]]) %>% unlist
+q2 <- lapply(est, FUN=function(x)x[[1]][["1-C"]][[1]][[3]]) %>% unlist
+
+# Many with negative dissimilarities
+q0[order(q0)][1:100]
+
+# Set negative dissimilarities to zero
+# Anne Chao's suggestion
+q0[q0<0] <- 0
+q1[q1<0] <- 0
+q2[q2<0] <- 0
+
+d <- list(q0, q1, q2)
+names(d) <- 0:2
+
+sor1 <- lapply(d, FUN = function(x){
+  for(i in 1:dim(p)[2]){
+  c1 <- p[1, i]
+  c2 <- p[2, i]
+  m[c2, c1] <- x[i]
+  }
+  as.dist(m)
+})
+```
+
+# Nonmetric Multidimensional Scaling (nMDS)
+
+```{r}
+mds <- lapply(sor1, FUN=function(x){
+  out <- metaMDS(x)
+  out$fit_concentration <- envfit(out, div[!zero ,c("SST", "TOC", "TN", "TP", "TIC", "Dino")] %>% scale)
+  return(out)
+})
+
+# Combine mds object with alpha diversity data
+mds[[1]]$div <- cbind(div[!zero, 1:28], qD = div$d0[!zero])
+mds[[2]]$div <- cbind(div[!zero, 1:28], qD = div$d1[!zero], qE = div$e1[!zero])
+mds[[3]]$div <- cbind(div[!zero, 1:28], qD = div$d2[!zero], qE = div$e2[!zero])
+
+mds[[1]]$qD.lab <- expression(""^0*italic(D))
+mds[[2]]$qD.lab <- expression(""^1*italic(D))
+mds[[3]]$qD.lab <- expression(""^2*italic(D))
+
+mds[[1]]$panel.lab <- "(a)"
+mds[[2]]$panel.lab <- "(b)"
+mds[[3]]$panel.lab <- "(c)"
+```
+
+## Compare nMDS with species diversity
+
+```{r, fig.width=14, fig.height=16}
+lapply(mds, FUN=function(x){
+  dat <- cbind(x$points, x$div)
+  
+  p1 <- ggplot()+
+    geom_point(data=dat, aes(x=MDS1, y=MDS2, fill=Period2, size = qD), pch=21, alpha = 0.8)+
+    stat_ellipse(data=dat, aes(x=MDS1, y=MDS2, linetype = Period2, colour=Period2), type="t")+
+    annotate("text", x=-Inf, y=Inf, vjust=1.6, hjust=-0.1, label=paste("Stress", round(x$stress[1], 2), sep="=="), parse=T)+
+    scale_fill_viridis_d(direction = -1)+
+    scale_colour_viridis_d(direction = -1)+
+    guides(fill = guide_legend(order=1), size = guide_legend(order=3), linetype = guide_legend(order=1), colour = guide_legend(order=1))+
+    labs(x="MDS1", y="MDS2", fill="Period", size=x$qD.lab, linetype="Period", colour="Period", title = x$panel.lab)+  
+    theme_bw() %+replace% large
+  
+  p2 <- ggplot(dat, aes(x=Age_ka, y=MDS1))+
+    #geom_point()+
+    geom_path(aes(colour = Period2))+
+    scale_colour_viridis_d(direction = -1)+
+    labs(y="MDS1", x="Age (Ka)", colour="Period")+
+    coord_flip()+
+    scale_x_reverse()+
+    theme_bw() %+replace% large %+replace% no_legend
+  
+  p3 <- ggplot(dat, aes(x=Age_ka, y=MDS2))+
+    #geom_point()+
+    geom_path(aes(colour = Period2))+
+    scale_colour_viridis_d(direction = -1)+
+    labs(y="MDS2", x="", colour="Period")+
+    coord_flip()+
+    scale_x_reverse()+
+    theme_bw()%+replace% large %+replace% no_legend
+  
+  p1+p2+p3+plot_layout(width = c(3, 1, 1))
+  
+}) %>% wrap_plots(ncol=1)
+```
+
+Fig.X. nMDS overlaid with species diversity. Panels show nMDS based on (a) coverage-based Sørensen (q = 0), (b) Horn (q =1), and (c) Morisita-Horn dissimilarity (q = 2). 
+
+```{r, fig.width=8, fig.height=12}
+mds[[1]]$sc <- 0.8
+mds[[2]]$sc <- 0.3
+mds[[3]]$sc <- 0.3
+
+lapply(mds, FUN=function(x){
+  dat <- cbind(x$points, x$div)
+  lab <- data.frame(x$fit_concentration$vectors$arrows*x$sc)
+  lab$label <- row.names(lab)
+ggplot()+
+    geom_point(data=dat, aes(x=MDS1, y=MDS2, fill=Period2, size = qD), pch=21, alpha = 0.8)+
+    stat_ellipse(data=dat, aes(x=MDS1, y=MDS2, linetype = Period2, colour=Period2), type="t")+
+    annotate("text", x=-Inf, y=Inf, vjust=1.6, hjust=-0.1, label=paste("Stress", round(x$stress[1], 2), sep="=="), parse=T)+
+    geom_segment(data=lab, aes(x=0, y=0, xend=NMDS1, yend=NMDS2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("red", 0.5))+
+    geom_label_repel(data=lab, aes(x=NMDS1, y=NMDS2, label=label), colour="gray10", fill=alpha("white", 0.7), size=5, label.padding = unit(0.2, "lines"))+
+    scale_fill_viridis_d(direction = -1)+
+    scale_colour_viridis_d(direction = -1)+
+    guides(fill = guide_legend(order=1), size = guide_legend(order=3), linetype = guide_legend(order=1), colour = guide_legend(order=1))+
+    labs(x="MDS1", y="MDS2", fill="Period", size=x$qD.lab, linetype="Period", colour="Period", title = x$panel.lab)+  
+    theme_bw() %+replace% large
+}) %>% wrap_plots(ncol=1, axes = "collect")
+```
+
+Fig.X. nMDS overlaid with species diversity. Panels show nMDS based on (a) coverage-based Sørensen (q = 0), (b) Horn (q =1), and (c) Morisita-Horn dissimilarity (q = 2). 
+
+```{r, fig.width=8, fig.height=12}
+mds[[1]]$sc <- 0.8
+mds[[2]]$sc <- 0.3
+mds[[3]]$sc <- 0.3
+
+lapply(mds, FUN=function(x){
+  dat <- cbind(x$points, x$div)
+  lab <- data.frame(x$fit_concentration$vectors$arrows*x$sc)
+  lab$label <- row.names(lab)
+ggplot()+
+    geom_point(data=dat, aes(x=MDS1, y=MDS2, fill=Period2, shape = Period2), alpha = 0.8, size = 3)+
+    stat_ellipse(data=dat, aes(x=MDS1, y=MDS2, linetype = Period2, colour=Period2), type="t")+
+    annotate("text", x=-Inf, y=Inf, vjust=1.6, hjust=-0.1, label=paste("Stress", round(x$stress[1], 2), sep="=="), parse=T)+
+    geom_segment(data=lab, aes(x=0, y=0, xend=NMDS1, yend=NMDS2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("red", 0.5))+
+    geom_label_repel(data=lab, aes(x=NMDS1, y=NMDS2, label=label), colour="gray10", fill=alpha("white", 0.7), size=5, label.padding = unit(0.2, "lines"))+
+    scale_fill_viridis_d(direction = -1)+
+    scale_colour_viridis_d(direction = -1)+
+    scale_shape_manual(values = c(21, 22, 25))+
+    labs(x="MDS1", y="MDS2", fill="Period", shape="Period", linetype="Period", colour="Period", title = x$panel.lab)+  
+    theme_bw() %+replace% large
+}) %>% wrap_plots(ncol=1, axes = "collect", guides = "collect")
+```
+
+Fig.X. nMDS overlaid with species diversity. Panels show nMDS based on (a) coverage-based Sørensen (q = 0), (b) Horn (q =1), and (c) Morisita-Horn dissimilarity (q = 2). 
+
+# Distance-based redundent analysis (dbRDA)
+
+```{r}
+db <- lapply(sor1, FUN=function(x){
+  out <- capscale(x ~ SST + TOC + TN + TP + TIC + Dino, data = div[!zero ,c("SST", "TOC", "TN", "TP", "TIC", "Dino")])
+  fit <- as.data.frame(out$CCA$biplot)
+  sc <- min(abs(c(range(out$CCA$u[,1]), range(out$CCA$u[,1]))))
+  fit <- fit*sc
+  fit$label <- row.names(fit)
+  out$fit <- fit
+  return(out)
+})
+
+# Combine mds object with alpha diversity data
+db[[1]]$div <- cbind(div[!zero, 1:28], qD = div$d0[!zero])
+db[[2]]$div <- cbind(div[!zero, 1:28], qD = div$d1[!zero], qE = div$e1[!zero])
+db[[3]]$div <- cbind(div[!zero, 1:28], qD = div$d2[!zero], qE = div$e2[!zero])
+
+db[[1]]$qD.lab <- expression(""^0*italic(D))
+db[[2]]$qD.lab <- expression(""^1*italic(D))
+db[[3]]$qD.lab <- expression(""^2*italic(D))
+
+db[[1]]$panel.lab <- "(a)"
+db[[2]]$panel.lab <- "(b)"
+db[[3]]$panel.lab <- "(c)"
+```
+
+```{r, fig.width=8, fig.height=16}
+lapply(db, FUN=function(x){
+  dat <- cbind(x$CCA$u, x$div)
+  lab <- data.frame(x$fit[,1:2]*2) # Environmental vectors
+  lab$label <- row.names(lab)
+  out <- summary(x)
+  d1f <- round(out$cont$importance[2, 1]*100,1) # RDA1 variance explained of the fit
+  d1t <- round(out$cont$importance[2, 1]*100*out$constr.chi/out$tot.chi, 1) # RDA1 variance explained of the total
+  d2f <- round(out$cont$importance[2, 2]*100,1) # # RDA2 variance explained of the fit
+  d2t <- round(out$cont$importance[2, 2]*100*out$constr.chi/out$tot.chi, 1) # # RDA1 variance explained of the total
+ggplot()+
+    geom_point(data=dat, aes(x=CAP1, y=CAP2, fill=Period2, size = qD), pch=21, alpha = 0.8)+
+    stat_ellipse(data=dat, aes(x=CAP1, y=CAP2, linetype = Period2, colour=Period2), type="t")+
+    geom_segment(data=lab, aes(x=0, y=0, xend=CAP1, yend=CAP2), size=1, arrow = arrow(length = unit(0.2,"cm")), colour=alpha("red", 0.5))+
+    geom_label_repel(data=lab, aes(x=CAP1, y=CAP2, label=label), colour="gray10", fill=alpha("white", 0.7), size=5, label.padding = unit(0.2, "lines"))+
+    scale_fill_viridis_d(direction = -1)+
+    scale_colour_viridis_d(direction = -1)+
+    guides(fill = guide_legend(order=1), size = guide_legend(order=3), linetype = guide_legend(order=1), colour = guide_legend(order=1))+
+    labs(x=bquote("dbRDA1"~(.(d1f)*"% of fit and"~.(d1t)*"% of total")), 
+         y=bquote("dbRDA1"~(.(d2f)*"% of fit and"~.(d2t)*"% of total")), 
+         fill="Period", size=x$qD.lab, linetype="Period", colour="Period", title = x$panel.lab)+  
+    theme_bw() %+replace% large
+}) %>% wrap_plots(ncol=1)
+```
+
+Fig.X. dbRDA overlaid with species diversity. Panels show dbRDA based on (a) coverage-based Sørensen (q = 0), (b) Horn (q =1), and (c) Morisita-Horn dissimilarity (q = 2). 
+
+
+# Indicator Species Analysis (ISA)
+
+The Indicator Value (IndVal), as defined by [Dufrêne & Legendre (1997)](https://doi.org/10.1890/0012-9615(1997)067[0345:SAAIST]2.0.CO;2), represents a measure of species specificity and fidelity within a specified group, such as pre-MPT, MPT, post-MPT. Specifically, IndVal is calculated as square root of the product of relative abundance (i.e., specificity) and relative frequency (i.e., fidelity) of a species present in the defined group. The specificity measures how exclusive a species to a particular group and is equal to the mean species abundance in target group divided by the sum of mean species abundances across all groups. On the other hand, fidelity measures how often a species occurs within a group and is equal to the number of sites within the target group where species is present divided by the total number of sites in the target group.
+
+The Indicator Value (IndVal) takes a value of 0 when a species is absent from the group and reaches a maximum of 1 when the species is found in all sites of only that group and not in any others. Therefore, the highest IndVal values are indicative of species that are abundant in one group but completely absent in others, while uncommon species typically yield low IndVal values due to their low fidelity. Conversely, species that are widespread across all groups will show high fidelity and thus high IndVal scores. The statistical significance of these IndVal values is assessed through a permutation test, which is performed 999 times. 
+
+The statistical significance of these IndVal values (or species-group associations) can be assessed through a permutation test (999 times) on the null hypothesis that the IndVal values in a specific group (or combination of groups) is not higher than the other groups.
+
+## Indicator species in each region
+
+A total of 37 out of 51 species were identified as significant indicator species in the Pre, MPT, Post, and MPT+Post periods. Pre+MPT+Post period do not have p values, because no permutation test is conducted for species in the group encompassing all three periods. 
+
+```{r}
+library(indicspecies)
+# Indicator species
+  IndVal <- multipatt(spp, sam$Period2, permutations=999)
+  # Convert output to long format
+  long <- cbind(Species=row.names(IndVal$A) %>% rep(each = 7),
+                   # Specificity (= relative abundance)
+                  pivot_longer(IndVal$A %>% as.data.frame, col=everything(), names_to = "index", values_to = "specificity"),
+                  # Fidelity (= frequency of occurrence)
+                  pivot_longer(IndVal$B %>% as.data.frame, col=everything(), names_to = "index", values_to = "fidelity")[,2],
+                  # Indicator value (square root of A * B)
+                  pivot_longer(IndVal$str %>% as.data.frame, col=everything(), names_to = "index", values_to = "stat")[,2]
+                  )
+# Add p values to the max indicator values among group (only those are consider indicator and tested)
+long$p.value <- NA
+long$index <- factor(long$index, levels=c("Pre", "MPT", "Post", "Pre+MPT", "MPT+Post", "Pre+Post", "Pre+MPT+Post"))
+S <- IndVal$sign
+S$index <- factor(S$index, levels=1:7, labels=c("Pre", "MPT", "Post", "Pre+MPT", "MPT+Post", "Pre+Post", "Pre+MPT+Post"))
+keep <- match(paste(row.names(S), S$index), paste(long$Species, long$index))
+long$p.value[keep] <- S$p.value
+long <- lapply(group_split(long, index), FUN=function(x)x[order(-x$p.value, x$stat, decreasing = TRUE),]) %>% ldply
+# Indicator species with p value 
+wp <- subset(long, stat!=0 & !is.na(p.value))
+# Indicator species without p value
+np <- subset(long, index == "Pre+MPT+Post" & is.na(p.value))
+np <- subset(np, !np$Species %in% wp$Species)
+
+# Combine significant and non-significant indicator species
+all_species <- rbind(wp, np)
+all_species$Group <- as.character(all_species$index)
+all_species$Group[all_species$p.value >=0.05 | is.na(all_species$p.value)] <- "N.S."
+all_species$Group <- factor(all_species$Group, levels = c("Pre", "MPT", "Post", "MPT+Post", "N.S."))
+all_species$Label <- sub(" ", "~~", paste("italic(", sub(" *\\(.*| *\\var. egregius.*", "", all_species$Species), ")", sep="")) 
+
+ord <- order(all_species$Group, -all_species$stat)
+all_species <- all_species[ord,]
+all_species[,-8] %>% kable(caption = "Indicator species") %>% kable_classic()
+
+# Top 3 indicator species from each group
+top_species <- all_species %>% group_split(Group) %>% lapply(FUN=function(x)x[order(-x$stat),][1:3,]) %>% ldply %>% subset(!is.na(stat))
+top_species[,-8] %>% kable(caption = "Only show the top three significant indicator species from each group. The Post period only have two significant indicator species. Three species with the highsest indicator values from Pre+MPT+Post are included. However, they are not significant indicator sepcies, because no permutation test was conducted") %>% kable_classic()
+```
+
+## Cluster Analysis
+
+Ward's minimum variance method was applied to Sørensen dissimilarities (q = 0), Horn dissimilarities (q = 1), and Morisita-Horn dissimilarities (q = 2) among the samples. This method was also utilized for Hellinger distances between species. The heatmap illustrates the species count after applying a fourth root transformation. Due to the large number of columns representing species, the figures for the full species list are not shown. Heatmaps will be shown based on indicator species later.
+
+```{r}
+library(pheatmap)
+library(RColorBrewer)
+
+pheatmap2 <- function(mat, x, ...){
+  
+  # Hellinger distances between species
+  dcols <- decostand(mat, "hellinger") %>% as.matrix %>%t %>% dist
+  
+  hc <- hclust(x, method="ward.D2")
+  clust <- cutree(hc, k=4)
+  
+  # rearrange by latitude
+  nc <- aggregate(sam$Age_ka[!zero], by=list(clust), FUN=max)[,2] %>% order(decreasing = TRUE)
+  clust <- factor(clust, nc, 1:4)
+  
+  annotation_row <- data.frame(Period=sam$Period2[!zero], Cluster=clust)
+  rownames(annotation_row) <- sam$Age_ka[!zero]
+  annotation_colors <- list(
+    Period = c("Pre"="#f3c300", "MPT"="#875692", "Post"="#f38400"),
+    Cluster = c("1"="#a1caf1", "2"="#be0032", "3"="#c2b280", "4"="#848482"))
+    
+  pheatmap(mat^0.25, 
+         color = brewer.pal(9, "Blues"), 
+         clustering_distance_rows = x, 
+         clustering_distance_cols = dcols, 
+         clustering_method = "ward.D2", 
+         legend_breaks = 0:3,
+         legend_labels = (0:3)^4,
+         cutree_rows = 4, 
+         annotation_row = annotation_row, 
+         annotation_colors = annotation_colors,
+         , ...)
+}
+```
+
+### Heatmap base on idicator species and Sørensen dissimilarities (q = 0) 
+
+```{r, fig.width=12, fig.height=12}
+pheatmap2(spp[!zero, top_species$Species], sor1[[1]], fontsize_col=12, show_rownames=FALSE, angle_col=45)
+```
+
+### Heatmap base on idicator species and Horn dissimilarities (q = 1) 
+
+```{r, fig.width=12, fig.height=12}
+pheatmap2(spp[!zero, top_species$Species], sor1[[2]], fontsize_col=12, show_rownames=FALSE, angle_col=45)
+```
+
+### Heatmap base on idicator species and Morisita-Horn dissimilarities (q = 2) 
+
+```{r, fig.width=12, fig.height=12}
+pheatmap2(spp[!zero, top_species$Species], sor1[[3]], fontsize_col=12, show_rownames=FALSE, angle_col=45)
+```
